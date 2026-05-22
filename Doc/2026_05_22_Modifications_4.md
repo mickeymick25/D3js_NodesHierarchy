@@ -41,7 +41,7 @@ Tous les changements visuels dans `applyNodeSelection()` utilisent désormais `.
 
 Les 4 cas couverts :
 - **Sélection** (mode Tree) : fade-out des non-connectés, Electric sur le chemin ancêtres+descendants
-- **Sélection** (mode Force/Pack) : fade-out des non-connectés, Electric sur les arêtes connectées
+- **Sélection** (mode Force) : fade-out des non-connectés, Electric sur les arêtes connectées
 - **Désélection** : retour aux couleurs par défaut avec même animation
 - **Changement de nœud sélectionné** : `.interrupt()` annule la transition en cours et repart de la valeur interpolée actuelle — aucun « flash »
 
@@ -158,16 +158,16 @@ Pour les liens non-connectés, la classe `.electric-current` est retirée, et la
 
 ## Tableau comparatif mis à jour
 
-| Fonctionnalité | Force | Arborescence | Radial | Pack |
-|---|---:|---:|---:|---:|
-| **Transitions animées sélection** | ✅ 250ms | ✅ 250ms | ✅ 250ms | ✅ 250ms |
-| **Transitions animées désélection** | ✅ 250ms | ✅ 250ms | ✅ 250ms | ✅ 250ms |
-| **Courant électrique (dasharray flow)** | ✅ | ✅ | ✅ | ✅ |
-| **Alternance Electric ↔ Tertiary** | ✅ 2s | ✅ 2s | ✅ 2s | ✅ 2s |
-| **Opacité variable (1.0 ↔ 0.7)** | ✅ | ✅ | ✅ | ✅ |
-| **Halo glow (filtre SVG)** | ✅ | ✅ | ✅ | ✅ |
-| **Fil continu (dimWire)** | ✅ | ✅ | ✅ | ✅ |
-| **Direction flux (R3 → cible)** | ✅ | ✅ | ✅ | ✅ |
+| Fonctionnalité | Force | Arborescence |
+|---|:---:|:---:|
+| **Transitions animées sélection** | ✅ 250ms | ✅ 250ms |
+| **Transitions animées désélection** | ✅ 250ms | ✅ 250ms |
+| **Courant électrique (dasharray flow)** | ✅ | ✅ |
+| **Alternance Electric ↔ Tertiary** | ✅ 2s | ✅ 2s |
+| **Opacité variable (1.0 ↔ 0.7)** | ✅ | ✅ |
+| **Halo glow (filtre SVG)** | ✅ | ✅ |
+| **Fil continu (dimWire)** | ✅ | ✅ |
+| **Direction flux (R3 → cible)** | ✅ | ✅ |
 
 ---
 

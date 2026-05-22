@@ -86,7 +86,7 @@ En mode Arborescence, le label R3 était positionné à l'extérieur du cercle (
 
 ### Solution
 
-Le label R3 est désormais centré dans le cercle avec le nom du site en dessous, comme dans les modes Force, Pack et Radial :
+Le label R3 est désormais centré dans le cercle avec le nom du site en dessous, comme dans les modes Force et Arborescence :
 
 ```typescript
 // Avant
@@ -124,8 +124,8 @@ Réinitialisé quand le site change, préservé quand le mode de layout change.
 
 #### Handler de clic
 
-- **Force/Pack** : Clic sur R1/R2 → toggle sélection. Clic sur centre → aucune action.
-- **Arborescence/Radial** : Clic sur R1/R2 feuille → toggle sélection. Clic sur branche → collapse/expand (pas de sélection).
+- **Force** : Clic sur R1/R2 → toggle sélection. Clic sur centre → aucune action.
+- **Arborescence** : Clic sur R1/R2 feuille → toggle sélection. Clic sur branche → collapse/expand (pas de sélection).
 - La sélection est ré-appliquée après chaque rendu si `selectedNodeId` est défini.
 
 #### Méthode `applyNodeSelection()`
@@ -135,16 +135,16 @@ Nouvelle méthode qui utilise des requêtes DOM sur `this.g` pour appliquer/rest
 - **Sélectionné** : opacité 1 sur le nœud et ses éléments connectés, opacité réduite sur le reste
 - **Désélectionné** : reset de toutes les opacités à 1
 
-Mode Force/Pack : highlight les arêtes connectées au nœud sélectionné.  
-Mode Arborescence/Radial : highlight les ancêtres et descendants du nœud sélectionné.
+Mode Force : highlight les arêtes connectées au nœud sélectionné.
+Mode Arborescence : highlight les ancêtres et descendants du nœud sélectionné.
 
 #### Attributs `data-source-id` et `data-target-id`
 
-Ajoutés aux arêtes et labels en mode Force/Pack (déjà présents en Tree/Radial) pour permettre les requêtes DOM dans `applyNodeSelection()`.
+Ajoutés aux arêtes et labels en mode Force (déjà présents en Tree) pour permettre les requêtes DOM dans `applyNodeSelection()`.
 
 #### Handlers `mouseleave` modifiés
 
-Dans `addNeighborHover`, `addCenterHover`, `addHierarchyHoverInteractions`, et le handler inline du mode Pack, le `mouseleave` restaure la sélection au lieu de reset à 1 :
+Dans `addNeighborHover`, `addCenterHover`, `addHierarchyHoverInteractions`, le `mouseleave` restaure la sélection au lieu de reset à 1 :
 
 ```typescript
 .on("mouseleave", () => {
@@ -184,9 +184,9 @@ Les couleurs par défaut (désélectionné) utilisent désormais les variantes *
 | Élément | Avant | Après |
 |---|---|---|
 | Cercle extérieur (halo) R1/R2 | `COLOR_ON_PRIMARY` fixe | `NODE_STROKE_COLORS[type]` dynamique |
-| Badge texte R1/R2 (Tree/Radial) | `COLOR_ON_PRIMARY` | `NODE_TEXT_COLORS[type]` |
-| Tag SIGMPR rect (Tree/Radial) | `COLOR_PRIMARY` | `NODE_STROKE_COLORS[type]` |
-| Tag SIGMPR rect (Force/Pack) | `COLOR_PRIMARY` | `NODE_STROKE_COLORS[type]` |
+| Badge texte R1/R2 (Tree) | `COLOR_ON_PRIMARY` | `NODE_TEXT_COLORS[type]` |
+| Tag SIGMPR rect (Tree) | `COLOR_PRIMARY` | `NODE_STROKE_COLORS[type]` |
+| Tag SIGMPR rect (Force) | `COLOR_PRIMARY` | `NODE_STROKE_COLORS[type]` |
 
 #### Résultat visuel
 
@@ -216,7 +216,7 @@ Dans `applyNodeSelection()`, après la gestion de l'opacité, les couleurs des c
 
 - Nœud sélectionné (R1/R2) : cercle intérieur → `ELECTRIC_CONTAINER` / `ELECTRIC`, halo → `ELECTRIC`
 - Nœuds non sélectionnés : reset à `NODE_COLORS[type]` / `NODE_STROKE_COLORS[type]`
-- Liens connectés (Force/Pack) : stroke → `ELECTRIC` pour les liens du nœud sélectionné
+- Liens connectés (Force) : stroke → `ELECTRIC` pour les liens du nœud sélectionné
 
 Les cercles sont identifiés par leur attribut `r` : `r=30` pour SITE, `r=22` pour R1/R2 (cercle intérieur), `r=34` ou `r=26` pour le halo extérieur.
 
@@ -232,9 +232,8 @@ Le mini-tag affichait `SIG:750101` au lieu de `SIGMPR:750101`.
 
 Remplacement de `SIG:` par `SIGMPR:` dans les 3 modes de rendu :
 
-- `drawNodeCircles()` (Force/Pack)
+- `drawNodeCircles()` (Force)
 - `renderTreeLayout()` (Arborescence)
-- `renderRadialLayout()` (Radial)
 
 ### Positionnement en mode Arborescence
 

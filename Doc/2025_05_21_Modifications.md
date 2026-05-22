@@ -106,18 +106,16 @@ private getSavedPosition(): void  // Position sauvegardée ou position par défa
 |---|---|
 | **Force** | Nœuds démarrés aux positions sauvegardées, simulation D3 anime vers l'équilibre |
 | **Arborescence** | Nœuds partent des positions sauvegardées → transition 600ms vers positions cibles |
-| **Radial** | Idem arborescence |
-| **Pack** | Idem, avec mise à jour des chemins après la transition |
 
 Les liens SVG apparaissent en fondu (opacity 0 → 1) pendant la seconde moitié de la transition.
 
 ### Attribut `data-node-id`
 
-Ajouté sur tous les groupes de nœuds (force, pack, tree, radial) pour permettre le suivi des positions :
+Ajouté sur tous les groupes de nœuds (force, tree) pour permettre le suivi des positions :
 
 ```typescript
-.attr("data-node-id", (d) => d.id)       // Force/Pack
-.attr("data-node-id", (d: any) => d.data.id)  // Tree/Radial
+.attr("data-node-id", (d) => d.id)       // Force
+.attr("data-node-id", (d: any) => d.data.id)  // Tree
 ```
 
 ---
@@ -130,9 +128,8 @@ Suppression du style pointillé (`stroke-dasharray`) sur les liens logistique da
 
 | Mode | Avant | Après |
 |---|---|---|
-| Force/Pack (`createEdgePaths`) | `stroke-dasharray: "12,6"` pour LOGISTICS | Ligne continue |
+| Force (`createEdgePaths`) | `stroke-dasharray: "12,6"` pour LOGISTICS | Ligne continue |
 | Arborescence | `stroke-dasharray: "8,4"` pour LOGISTICS | Ligne continue |
-| Radial | `stroke-dasharray: "8,4"` pour LOGISTICS | Ligne continue |
 
 **Légende** : Le trait pointillé (`border-t-2 border-dashed`) est remplacé par une ligne pleine (`h-0.5 rounded-full`) avec `background-color` au lieu de `border-color`.
 
@@ -146,9 +143,8 @@ La distinction entre Animation et Logistique repose désormais uniquement sur la
 
 | Mode | Avant | Après |
 |---|---|---|
-| Force / Pack | `stroke-width: 3` | `stroke-width: 1.5` |
+| Force | `stroke-width: 3` | `stroke-width: 1.5` |
 | Arborescence | `stroke-width: 2.5` | `stroke-width: 1.5` |
-| Radial | `stroke-width: 2` | `stroke-width: 1.5` |
 
 Les épaisseurs de contour des nœuds (`stroke-width: 2.5` pour R1/R2, `1.5` pour SITE) sont inchangées.
 

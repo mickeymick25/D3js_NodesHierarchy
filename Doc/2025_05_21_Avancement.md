@@ -7,7 +7,7 @@
 
 ## Résumé du projet
 
-Application Angular 17 de visualisation interactive d'un graphe ego-centered des relations d'un site (COP), avec séparation visuelle entre flux d'animation (ventes) et flux logistiques. Plusieurs modes de représentation disponibles : force-directed, arborescence, radial et pack.
+Application Angular 17 de visualisation interactive d'un graphe ego-centered des relations d'un site (COP), avec séparation visuelle entre flux d'animation (ventes) et flux logistiques. Deux modes de représentation disponibles : force-directed et arborescence.
 
 ---
 
@@ -48,7 +48,7 @@ CopLinksVisualization/
         │   └── graph.service.ts              → Données mock + filtrage 1-hop strict + toggles + layout mode
         └── components/
             ├── graph/
-            │   └── graph.component.ts/html/scss  → Rendu D3.js SVG (4 modes)
+            │   └── graph.component.ts/html/scss  → Rendu D3.js SVG (2 modes)
             ├── legend/
             │   └── legend.component.ts           → Légende cliquable (filtres)
             ├── site-selector/
@@ -65,10 +65,8 @@ CopLinksVisualization/
 |---|---|---|
 | `force` | Force | Graphe force-directed ego-centered (mode original) |
 | `tree` | Arborescence | Arbre hiérarchique horizontal (Reingold-Tilford, d3.tree) |
-| `radial` | Radial | Arbre radial centré sur le site (projection polaire) |
-| `pack` | Pack | Arcs groupés par type (R1 en haut, R2 en bas) |
 
-### Structure hiérarchique (modes tree & radial)
+### Structure hiérarchique (mode tree)
 
 ```
 SITE R3 (racine)
@@ -119,9 +117,9 @@ SITE R3 (racine)
 
 ### ✅ Sélecteur de mode de représentation
 
-- Dropdown dans le header avec 4 modes : Force, Arborescence, Radial, Pack
+- Dropdown dans le header avec 2 modes : Force et Arborescence
 - Changement de mode → recalcul complet du graphe
-- Le mode Force conserve le drag interactif, les autres modes sont statiques
+- Les deux modes disposent du drag interactif et de la simulation D3
 
 ### ✅ Interactions
 
@@ -158,20 +156,6 @@ SITE R3 (racine)
 - Nœuds branches (Animation/Logistique) avec label coloré
 - Labels R1/R2 à droite des cercles, label R3 à gauche
 - Badges A/L au milieu des liens
-
-#### Mode Radial
-
-- Arbre radial centré sur le site (projection polaire)
-- Liens courbes (quadratic bezier)
-- Nœuds branches colorés
-- Badges A/L au milieu des liens
-
-#### Mode Pack
-
-- SITE au centre, R1 en arc supérieur, R2 en arc inférieur
-- Labels de zone R1/R2 en surimpression
-- Badges A/L, tooltips, hover comme le mode force
-- Drag désactivé (layout statique)
 
 ---
 
@@ -246,7 +230,7 @@ SITE R3 (racine)
 | Courbure insuffisante | Spacing passé de 30 à 65 |
 | Types D3 incompatibles | Utilisation de `any` pour les sélections D3 complexes |
 | Shadowing de `this` dans `.each()` | Utilisation de `const self = this` au lieu de `.bind(this)` |
-| Layout modes multiples | Refonte en 4 renderers séparés (renderForceLayout, renderTreeLayout, renderRadialLayout, renderPackLayout) |
+| Layout modes multiples | Refonte en 2 renderers séparés (renderForceLayout, renderTreeLayout) |
 | Couleurs R3 trop similaires aux autres | Passage à la palette Electric (fond #F7FBFF, bordure #4B9BF5) |
 | Labels illisibles en arborescence | Positionnement R1/R2 à droite, R3 à gauche |
 

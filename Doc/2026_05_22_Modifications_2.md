@@ -9,7 +9,7 @@
 
 Cinq séries de modifications ont été apportées lors de cette session :
 
-1. **Correction du positionnement du nœud centre** — Les modes Arborescence et Radial recentraient le nœud R3 au milieu de l'écran lors du resize
+1. **Correction du positionnement du nœud centre** — Le mode Arborescence recentrait le nœud R3 au milieu de l'écran lors du resize
 2. **Ajout des identifiants métier** — DMS ID sur les liens logistiques, SIGMPR sur les nœuds R1
 3. **Ajustement de l'espacement** — Augmentation des distances entre nœuds et des rayons de collision
 4. **Correction de l'ordre Z** — Les liens ne passent plus au-dessus des bulles de nœuds
@@ -17,11 +17,11 @@ Cinq séries de modifications ont été apportées lors de cette session :
 
 ---
 
-## 1. Correction du positionnement du nœud centre (R3) en Arborescence/Radial
+## 1. Correction du positionnement du nœud centre (R3) en Arborescence
 
 ### Problème
 
-En modes Arborescence et Radial, le nœud centre R3 était repositionné au milieu de l'écran (`fx = w/2, fy = h/2`) lors d'un resize de la fenêtre. Ce comportement était correct pour les modes Force et Pack, mais incorrect pour les modes où le centre doit rester à sa position de layout (à gauche en arborescence, au centre en radial mais recalculé par le layout).
+En mode Arborescence, le nœud centre R3 était repositionné au milieu de l'écran (`fx = w/2, fy = h/2`) lors d'un resize de la fenêtre. Ce comportement était correct pour le mode Force, mais incorrect pour le mode Arborescence où le centre doit rester à sa position de layout (à gauche).
 
 ### Solution
 
@@ -45,8 +45,6 @@ private setupAutoZoomAndResize(..., centerNode, useSimulationEnd: boolean, recen
 |---|:---:|:---:|
 | Force | `true` | `true` |
 | Arborescence | `true` | `false` |
-| Radial | `true` | `false` |
-| Pack | `true` | `true` |
 
 ---
 
@@ -100,9 +98,7 @@ interface HierarchyDatum {
 Les données `sigmpr` et `dmsId` sont propagées dans :
 - `buildHierarchy()` — vers les feuilles de la hiérarchie
 - `renderForceLayout()` — SimNode et SimLink
-- `renderPackLayout()` — SimNode et SimLink
 - `renderTreeLayout()` — SimNode (feuilles)
-- `renderRadialLayout()` — SimNode (feuilles)
 
 ---
 
@@ -121,7 +117,7 @@ Le format a évolué au fil de la session :
 
 ### Badge DMS ID sur les liens logistiques
 
-**4 modes affectés :** Force, Pack, Arborescence, Radial
+**2 modes affectés :** Force, Arborescence
 
 - Les liens d'animation gardent le badge **`A`**
 - Les liens logistiques sans DMS ID affichent **`L`**
@@ -130,14 +126,14 @@ Le format a évolué au fil de la session :
 
 ### Mini-tag SIGMPR sur les nœuds R1
 
-**4 modes affectés :** Force, Pack, Arborescence, Radial
+**2 modes affectés :** Force, Arborescence
 
 - Chaque nœud R1 avec un `sigmpr` affiche un mini-tag **`SIG:750101`** en dessous du label
 - Le mini-tag est un rectangle arrondi avec fond `COLOR_PRIMARY` (#978B7F) et texte `COLOR_ON_PRIMARY` (#DEDAD5)
 - Police 7px, font-weight 700
 - Le rect est dimensionné automatiquement via `getBBox()`
 
-### Tooltip des liens (Force/Pack)
+### Tooltip des liens (Force)
 
 Le tooltip des liens logistiques inclut désormais le DMS ID :
 
@@ -163,8 +159,6 @@ Le tooltip des liens logistiques inclut désormais le DMS ID :
 |---|---|---|
 | Force | radius 70, strength 0.8 | **radius 90**, strength 0.8 |
 | Arborescence | radius 10, strength 0.3 | **radius 30**, strength 0.3 |
-| Radial | radius 10, strength 0.3 | **radius 30**, strength 0.3 |
-| Pack | radius 70, strength 0.8 | **radius 90**, strength 0.8 |
 
 ---
 
@@ -172,13 +166,13 @@ Le tooltip des liens logistiques inclut désormais le DMS ID :
 
 ### Problème
 
-Dans les modes Force et Pack, les nœuds voisins (R1/R2) étaient rendus **avant** les liens SVG, ce qui faisait apparaître les traits par-dessus les bulles des sites.
+Dans le mode Force, les nœuds voisins (R1/R2) étaient rendus **avant** les liens SVG, ce qui faisait apparaître les traits par-dessus les bulles des sites.
 
 ### Solution
 
 **Fichier :** `src/app/components/graph/graph.component.ts`
 
-L'ordre de rendu dans `renderForceLayout()` et `renderPackLayout()` a été réorganisé :
+L'ordre de rendu dans `renderForceLayout()` a été réorganisé :
 
 **Avant :**
 1. Nœuds voisins (R1/R2)
@@ -194,7 +188,7 @@ L'ordre de rendu dans `renderForceLayout()` et `renderPackLayout()` a été réo
 
 Les nœuds voisins sont rendus après les liens et remontés via `.raise()` pour s'assurer qu'ils sont au-dessus.
 
-Les modes Arborescence et Radial avaient déjà le bon ordre (liens → badges → nœuds), aucune correction nécessaire.
+Le mode Arborescence avait déjà le bon ordre (liens → badges → nœuds), aucune correction nécessaire.
 
 ### Ordre Z final (tous modes)
 
@@ -213,4 +207,4 @@ Les modes Arborescence et Radial avaient déjà le bon ordre (liens → badges �
 |---|---|
 | `src/app/models/graph.model.ts` | Ajout `sigmpr?: string` sur Node, `dmsId?: string` sur Edge |
 | `src/app/services/graph.service.ts` | Données mock avec sigmpr et dmsId |
-| `src/app/components/graph/graph.component.ts` | Toutes les modifications de rendu, ordre Z, espacement, badges |
+| `src/app/components/graph/graph.component.ts` | Toutes les modifications de rendu, ordre Z, espacement, badges (modes Force et Arborescence) |

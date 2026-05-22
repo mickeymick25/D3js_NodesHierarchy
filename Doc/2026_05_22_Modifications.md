@@ -7,25 +7,25 @@
 
 ## Résumé
 
-Trois séries de modifications ont été apportées :
+Deux séries de modifications ont été apportées :
 
-1. **Alignement des interactions** — Ajout des interactions hover (nœuds + liens) et tooltips aux modes Arborescence, Radial et Pack
-2. **Gravité et drag** — Ajout de la simulation D3 (forceX/forceY) et du drag des nœuds pour les modes Pack, Arborescence et Radial
-3. **Corrections** — Positionnement du nœud centre en mode Arborescence/Radial, correction du décalage drag, ajustement des forces
+1. **Alignement des interactions** — Ajout des interactions hover (nœuds + liens) et tooltips au mode Arborescence
+2. **Gravité et drag** — Ajout de la simulation D3 (forceX/forceY) et du drag des nœuds pour le mode Arborescence
+3. **Corrections** — Positionnement du nœud centre en mode Arborescence, correction du décalage drag, ajustement des forces
 
 ---
 
-## 1. Interactions hover alignées (Arborescence, Radial, Pack)
+## 1. Interactions hover alignées (Arborescence)
 
 ### Problème
 
-Seul le mode Force disposait d'interactions hover (highlight des nœuds/liens, tooltips sur les liens). Les modes Arborescence, Radial et Pack n'avaient aucune interaction au-delà du zoom/pan.
+Seul le mode Force disposait d'interactions hover (highlight des nœuds/liens, tooltips sur les liens). Le mode Arborescence n'avait aucune interaction au-delà du zoom/pan.
 
 ### Solution
 
 #### Méthode partagée `addHierarchyHoverInteractions`
 
-Ajout d'une méthode réutilisable pour les modes hiérarchiques (Arborescence et Radial) :
+Ajout d'une méthode réutilisable pour le mode Arborescence :
 
 | Interaction | Comportement |
 |---|---|
@@ -39,14 +39,10 @@ La méthode construit des maps d'ancêtres et de descendants depuis la hiérarch
 
 #### Attributs `data-*` sur les liens et badges
 
-- `data-source-id` et `data-target-id` ajoutés sur chaque path de lien (modes Arborescence et Radial)
-- `data-target-id` ajouté sur chaque groupe de badge (modes Arborescence et Radial)
+- `data-source-id` et `data-target-id` ajoutés sur chaque path de lien (mode Arborescence)
+- `data-target-id` ajouté sur chaque groupe de badge (mode Arborescence)
 
 Ces attributs permettent au hover de déterminer quels liens et badges sont connectés à un nœud donné.
-
-#### Mode Pack
-
-Le mode Pack disposait déjà des interactions hover complètes (`addNeighborHover`, `addCenterHover`, `addEdgeTooltip`). Aucune modification nécessaire.
 
 ### Fichier modifié
 
@@ -58,27 +54,11 @@ Le mode Pack disposait déjà des interactions hover complètes (`addNeighborHov
 
 ### Problème
 
-Seul le mode Force permettait de déplacer les nœuds et avait une simulation physique (gravité, collision). Les trois autres modes étaient statiques : positions figées, aucune interaction de mouvement.
+Seul le mode Force permettait de déplacer les nœuds et avait une simulation physique (gravité, collision). Le mode Arborescence était statique : positions figées, aucune interaction de mouvement.
 
 ### Solution
 
-#### Mode Pack
-
-| Avant | Après |
-|---|---|
-| Nœuds fixés par `fx`/`fy` | Nœuds attirés vers leurs positions cibles par `forceX`/`forceY` |
-| Pas de drag | Drag interactif sur les nœuds voisins |
-| Transitions CSS pour le changement de mode | Simulation D3 pour les transitions |
-| `setupAutoZoomAndResize(..., false)` | `setupAutoZoomAndResize(..., true)` (auto-zoom après simulation) |
-
-**Détails :**
-- `fx`/`fy` supprimés des nœuds R1/R2 (seul le centre reste épinglé)
-- `targetPositions` Map pour les cibles de `forceX`/`forceY`
-- Simulation : `forceX`(0.1) + `forceY`(0.1) + `forceCollide`(radius 70, strength 0.8)
-- Drag : `d3.drag()` avec `alphaTarget(0.3)` au start, relâche à la fin
-- Tick handler : mise à jour des positions, chemins et labels
-
-#### Modes Arborescence et Radial
+#### Modes Arborescence
 
 | Avant | Après |
 |---|---|
@@ -98,12 +78,6 @@ Seul le mode Force permettait de déplacer les nœuds et avait une simulation ph
 - `getPosition()` : lookup hybride (SimNode pour les feuilles, `targetPositions` pour les branches/centre)
 - `parentMap` : map parent → enfant pour la mise à jour des badges
 
-#### Transitions entre modes
-
-- Les transitions CSS (`d3.transition`) ont été supprimées pour les modes Pack, Arborescence et Radial
-- La simulation D3 assure désormais l'animation : les nœuds partent de leurs positions sauvegardées et sont attirés vers leurs positions cibles
-- Les liens et badges sont mis à jour en temps réel pendant la simulation
-
 ### Fichier modifié
 
 - `src/app/components/graph/graph.component.ts`
@@ -112,7 +86,7 @@ Seul le mode Force permettait de déplacer les nœuds et avait une simulation ph
 
 ## 3. Corrections
 
-### Positionnement du nœud centre (Arborescence/Radial)
+### Positionnement du nœud centre (Arborescence)
 
 **Problème :** Le nœud centre (SITE R3) était épinglé à sa position sauvegardée (potentiellement le centre de l'écran en provenance du mode Force) au lieu de sa position de layout (à gauche en arborescence).
 
@@ -132,7 +106,7 @@ centerSimNode.x = savedCenterPos ? savedCenterPos.x : centerSimNode.fx;
 centerSimNode.y = savedCenterPos ? savedCenterPos.y : centerSimNode.fy;
 ```
 
-### Décalage du drag (Arborescence/Radial)
+### Décalage du drag (Arborescence)
 
 **Problème :** Le drag positionnait les nœuds loin du curseur, particulièrement avec le zoom actif.
 
@@ -151,7 +125,7 @@ sn.fx = mx;
 sn.fy = my;
 ```
 
-### Ajustement des forces (Arborescence/Radial)
+### Ajustement des forces (Arborescence)
 
 | Paramètre | Avant | Après | Raison |
 |---|---|---|---|
@@ -163,16 +137,16 @@ sn.fy = my;
 
 ## Tableau comparatif mis à jour
 
-| Fonctionnalité | Force | Arborescence | Radial | Pack |
-|---|:---:|:---:|:---:|:---:|
-| **Simulation D3** | ✅ | ✅ | ✅ | ✅ |
-| **Gravité (forceX/forceY)** | ✅ | ✅ (0.5) | ✅ (0.5) | ✅ (0.1) |
-| **Collision** | ✅ (r70, s0.8) | ✅ (r10, s0.3) | ✅ (r10, s0.3) | ✅ (r70, s0.8) |
-| **Drag des nœuds** | ✅ voisins | ✅ feuilles | ✅ feuilles | ✅ voisins |
-| **Hover nœud centre** | ✅ | ✅ | ✅ | ✅ |
-| **Hover nœud voisin** | ✅ edges liés | ✅ chaîne ancêtres+descendants | ✅ chaîne ancêtres+descendants | ✅ edges liés |
-| **Hover nœud branche** | N/A | ✅ sous-arbre | ✅ sous-arbre | N/A |
-| **Hover lien → Tooltip** | ✅ | ✅ | ✅ | ✅ |
-| **Drag container** | défaut | SVG | SVG | défaut |
-| **Transition entre modes** | simulation | simulation | simulation | simulation |
-| **Centre épinglé** | ✅ | ✅ (layout position) | ✅ (layout position) | ✅ (centre écran) |
+| Fonctionnalité | Force | Arborescence |
+|---|:---:|:---:|
+| **Simulation D3** | ✅ | ✅ |
+| **Gravité (forceX/forceY)** | ✅ | ✅ (0.5) |
+| **Collision** | ✅ (r70, s0.8) | ✅ (r10, s0.3) |
+| **Drag des nœuds** | ✅ voisins | ✅ feuilles |
+| **Hover nœud centre** | ✅ | ✅ |
+| **Hover nœud voisin** | ✅ edges liés | ✅ chaîne ancêtres+descendants |
+| **Hover nœud branche** | N/A | ✅ sous-arbre |
+| **Hover lien → Tooltip** | ✅ | ✅ |
+| **Drag container** | défaut | SVG |
+| **Transition entre modes** | simulation | simulation |
+| **Centre épinglé** | ✅ | ✅ (layout position) |
