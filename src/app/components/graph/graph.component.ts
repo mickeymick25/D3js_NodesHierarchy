@@ -46,8 +46,17 @@ export class GraphComponent implements OnChanges, OnDestroy {
   @ViewChild("chartContainer", { static: true })
   container!: ElementRef<HTMLDivElement>;
 
+  // Persistent SVG state
+  private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null =
+    null;
+  private g: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
+  private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
   private simulation: d3.Simulation<SimNode, SimLink> | null = null;
   private resizeObserver: ResizeObserver | null = null;
+
+  // Saved positions for smooth layout transitions
+  private savedPositions = new Map<string, { x: number; y: number }>();
+  private readonly TRANSITION_MS = 600;
 
   // Design tokens
   private readonly COLOR_PRIMARY = "#978B7F";
@@ -111,24 +120,113 @@ export class GraphComponent implements OnChanges, OnDestroy {
   };
 
   ngOnChanges(changes: SimpleChanges): void {
-    if ((changes["graphData"] && this.graphData) || changes["layoutMode"]) {
+    if (!this.graphData) return;
+
+    if (changes["graphData"]) {
+      // Data changed → full rebuild
+      this.destroySvg();
+      this.savedPositions.clear();
+      this.renderGraph();
+    } else if (changes["layoutMode"]) {
+      // Layout changed → smooth transition
+      this.saveNodePositions();
+      this.stopSimulation();
       this.renderGraph();
     }
   }
 
   ngOnDestroy(): void {
-    this.cleanup();
+    this.destroySvg();
   }
 
-  private cleanup(): void {
+  private stopSimulation(): void {
     if (this.simulation) {
       this.simulation.stop();
       this.simulation = null;
     }
+  }
+
+  private destroySvg(): void {
+    this.stopSimulation();
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
       this.resizeObserver = null;
     }
+    if (this.svg) {
+      d3.select(this.container.nativeElement).select("svg").remove();
+      this.svg = null;
+      this.g = null;
+      this.zoomBehavior = null;
+    }
+  }
+
+  private initSvg(): void {
+    const containerEl = this.container.nativeElement;
+    const width = containerEl.clientWidth;
+    const height = containerEl.clientHeight;
+
+    this.svg = d3
+      .select(containerEl)
+      .append("svg")
+      .attr("width", width)
+      .attr("height", height);
+
+    const defs = this.svg.append("defs");
+    this.addArrowMarkers(defs);
+
+    this.g = this.svg.append("g");
+
+    this.zoomBehavior = d3
+      .zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.3, 3])
+      .on("zoom", (event) => {
+        this.g!.attr("transform", event.transform.toString());
+      });
+    this.svg.call(this.zoomBehavior);
+  }
+
+  private saveNodePositions(): void {
+    this.savedPositions.clear();
+    if (!this.g) return;
+
+    const positions = new Map<string, { x: number; y: number }>();
+    this.g!.selectAll("[data-node-id]").each(function () {
+      const el = d3.select(this);
+      const nodeId = el.attr("data-node-id");
+      const transform = el.attr("transform");
+      if (nodeId && transform) {
+        const match = transform.match(
+          /translate\(\s*([^,\s]+)[\s,]+([^)\s]+)\s*\)/,
+        );
+        if (match) {
+          const x = parseFloat(match[1]);
+          const y = parseFloat(match[2]);
+          if (!isNaN(x) && !isNaN(y)) {
+            positions.set(nodeId, { x, y });
+          }
+        }
+      }
+    });
+
+    this.savedPositions = positions;
+  }
+
+  private getSavedPosition(
+    id: string,
+    defaultX: number,
+    defaultY: number,
+  ): { x: number; y: number } {
+    const saved = this.savedPositions.get(id);
+    if (saved) {
+      return saved;
+    }
+    // For nodes without saved position (e.g. branch nodes), start from center
+    // or from the center node's position if available
+    const centerPos = this.savedPositions.get(this.graphData?.center.id || "");
+    if (centerPos) {
+      return centerPos;
+    }
+    return { x: defaultX, y: defaultY };
   }
 
   private countParallelEdges(edges: SimLink[]): Map<string, number> {
@@ -159,7 +257,10 @@ export class GraphComponent implements OnChanges, OnDestroy {
    *   ├── Animation (branch)
    *   │   └── R1 targets...
    *   └── Logistique (branch)
-   *       └── R1/R2 targets...
+   *       ├── R1 (sub-branch)
+   *       │   └── R1 logistics targets...
+   *       └── R2 (sub-branch)
+   *           └── R2 targets...
    */
   private buildHierarchy(): HierarchyDatum {
     if (!this.graphData) {
@@ -168,7 +269,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     const center = this.graphData.center;
     const animationTargets: HierarchyDatum[] = [];
-    const logisticsTargets: HierarchyDatum[] = [];
+    const logisticsR1Targets: HierarchyDatum[] = [];
+    const logisticsR2Targets: HierarchyDatum[] = [];
 
     for (const edge of this.graphData.edges) {
       const targetNode = this.graphData.nodes.find((n) => n.id === edge.target);
@@ -184,7 +286,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
       if (edge.type === "ANIMATION") {
         animationTargets.push(leaf);
       } else {
-        logisticsTargets.push(leaf);
+        if (targetNode.type === "R1") {
+          logisticsR1Targets.push(leaf);
+        } else {
+          logisticsR2Targets.push(leaf);
+        }
       }
     }
 
@@ -205,13 +311,35 @@ export class GraphComponent implements OnChanges, OnDestroy {
       });
     }
 
-    if (logisticsTargets.length > 0) {
+    if (logisticsR1Targets.length > 0 || logisticsR2Targets.length > 0) {
+      const logisticsChildren: HierarchyDatum[] = [];
+
+      if (logisticsR1Targets.length > 0) {
+        logisticsChildren.push({
+          id: "__logistics_r1__",
+          label: "R1",
+          type: "R1",
+          edgeType: "LOGISTICS",
+          children: logisticsR1Targets,
+        });
+      }
+
+      if (logisticsR2Targets.length > 0) {
+        logisticsChildren.push({
+          id: "__logistics_r2__",
+          label: "R2",
+          type: "R2",
+          edgeType: "LOGISTICS",
+          children: logisticsR2Targets,
+        });
+      }
+
       root.children!.push({
         id: "__logistics__",
         label: "Logistique",
         type: "R2",
         edgeType: "LOGISTICS",
-        children: logisticsTargets,
+        children: logisticsChildren,
       });
     }
 
@@ -220,7 +348,30 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
   private renderGraph(): void {
     if (!this.graphData) return;
-    this.cleanup();
+
+    // Ensure SVG container exists
+    if (!this.svg || !this.g) {
+      this.initSvg();
+    }
+
+    // Update SVG dimensions
+    const containerEl = this.container.nativeElement;
+    this.svg!.attr("width", containerEl.clientWidth).attr(
+      "height",
+      containerEl.clientHeight,
+    );
+
+    // Clear previous content (keep SVG container)
+    this.g!.selectAll("*").remove();
+
+    // Recreate defs/markers (cleared byselectAll)
+    this.svg!.select("defs").remove();
+    this.svg!.insert("defs", ":first-child").call((d) =>
+      this.addArrowMarkers(d),
+    );
+
+    // Reset zoom to identity
+    this.svg!.call(this.zoomBehavior!.transform, d3.zoomIdentity);
 
     // Delegate to specialized renderers based on layout mode
     switch (this.layoutMode) {
@@ -250,26 +401,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const width = containerEl.clientWidth;
     const height = containerEl.clientHeight;
 
-    d3.select(containerEl).select("svg").remove();
-
-    const svg = d3
-      .select(containerEl)
-      .append("svg")
-      .attr("width", width)
-      .attr("height", height);
-
-    const defs = svg.append("defs");
-    this.addArrowMarkers(defs);
-
-    const g = svg.append("g");
-
-    const zoom = d3
-      .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 3])
-      .on("zoom", (event) => {
-        g.attr("transform", event.transform.toString());
-      });
-    svg.call(zoom);
+    // Use persistent SVG
+    const svg = this.svg!;
+    const g = this.g!;
 
     const simNodes: SimNode[] = this.graphData.nodes.map((n) => ({
       id: n.id,
@@ -290,26 +424,61 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const centerNode = simNodes.find((n) => n.id === this.graphData!.center.id);
 
     if (centerNode) {
-      centerNode.fx = width / 2;
-      centerNode.fy = height / 2;
-      centerNode.x = width / 2;
-      centerNode.y = height / 2;
+      // Use saved position if available, otherwise center
+      const saved = this.savedPositions.get(centerNode.id);
+      centerNode.fx = saved ? saved.x : width / 2;
+      centerNode.fy = saved ? saved.y : height / 2;
+      centerNode.x = centerNode.fx;
+      centerNode.y = centerNode.fy;
     }
 
-    // Initialize non-center nodes in a circle
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const spreadAngle = (2 * Math.PI) / Math.max(simNodes.length - 1, 1);
-    let nodeIndex = 0;
-    for (const n of simNodes) {
-      if (n.id !== this.graphData!.center.id) {
-        const angle = spreadAngle * nodeIndex;
-        const dist = 200;
+    // Initialize non-center nodes: R1 on the left, R2 on the right
+    const centerX = centerNode ? centerNode.x! : width / 2;
+    const centerY = centerNode ? centerNode.y! : height / 2;
+
+    const r1Nodes = simNodes.filter(
+      (n) => n.id !== this.graphData!.center.id && n.type === "R1",
+    );
+    const r2Nodes = simNodes.filter(
+      (n) => n.id !== this.graphData!.center.id && n.type === "R2",
+    );
+    const dist = 200;
+
+    // R1: spread across the left side (angles from 2π/3 to 4π/3)
+    r1Nodes.forEach((n, i) => {
+      const saved = this.savedPositions.get(n.id);
+      if (saved) {
+        n.x = saved.x;
+        n.y = saved.y;
+      } else {
+        const spread = r1Nodes.length > 1 ? Math.PI * 0.7 : 0;
+        const startAngle = Math.PI - spread / 2;
+        const angle =
+          r1Nodes.length === 1
+            ? Math.PI
+            : startAngle + (spread * i) / (r1Nodes.length - 1);
         n.x = centerX + Math.cos(angle) * dist;
         n.y = centerY + Math.sin(angle) * dist;
-        nodeIndex++;
       }
-    }
+    });
+
+    // R2: spread across the right side (angles from -π/3 to π/3)
+    r2Nodes.forEach((n, i) => {
+      const saved = this.savedPositions.get(n.id);
+      if (saved) {
+        n.x = saved.x;
+        n.y = saved.y;
+      } else {
+        const spread = r2Nodes.length > 1 ? Math.PI * 0.7 : 0;
+        const startAngle = -spread / 2;
+        const angle =
+          r2Nodes.length === 1
+            ? 0
+            : startAngle + (spread * i) / (r2Nodes.length - 1);
+        n.x = centerX + Math.cos(angle) * dist;
+        n.y = centerY + Math.sin(angle) * dist;
+      }
+    });
 
     const parallelCounts = this.countParallelEdges(simLinks);
     const groupIndexMap = new Map<string, number>();
@@ -328,6 +497,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .data(simNodes.filter((n) => n.id !== this.graphData!.center.id))
       .enter()
       .append("g")
+      .attr("data-node-id", (d) => d.id)
       .attr("cursor", "pointer")
       .call(
         d3
@@ -368,6 +538,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       ? g
           .append("g")
           .attr("class", "center-node")
+          .attr("data-node-id", centerNode.id)
           .datum(centerNode)
           .attr("transform", `translate(${centerNode.x},${centerNode.y})`)
       : null;
@@ -412,7 +583,17 @@ export class GraphComponent implements OnChanges, OnDestroy {
       )
       .force("charge", d3.forceManyBody().strength(-400))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(70).strength(0.8));
+      .force("collision", d3.forceCollide().radius(70).strength(0.8))
+      .force(
+        "x",
+        d3
+          .forceX<SimNode>((d) => {
+            if (d.type === "R1") return width / 2 - 120;
+            if (d.type === "R2") return width / 2 + 120;
+            return width / 2;
+          })
+          .strength(0.08),
+      );
 
     // Initial render
     edgePaths.attr("d", computePath);
@@ -437,7 +618,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     this.setupAutoZoomAndResize(
       svg,
       g,
-      zoom,
+      this.zoomBehavior!,
       containerEl,
       centerNode ?? null,
       true,
@@ -455,26 +636,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const width = containerEl.clientWidth;
     const height = containerEl.clientHeight;
 
-    d3.select(containerEl).select("svg").remove();
-
-    const svg = d3
-      .select(containerEl)
-      .append("svg")
-      .attr("width", width)
-      .attr("height", height);
-
-    const defs = svg.append("defs");
-    this.addArrowMarkers(defs);
-
-    const g = svg.append("g");
-
-    const zoom = d3
-      .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 3])
-      .on("zoom", (event) => {
-        g.attr("transform", event.transform.toString());
-      });
-    svg.call(zoom);
+    // Use persistent SVG
+    const svg = this.svg!;
+    const g = this.g!;
 
     // Build hierarchy
     const hierarchyData = this.buildHierarchy();
@@ -492,10 +656,18 @@ export class GraphComponent implements OnChanges, OnDestroy {
     // x → vertical position, y → horizontal depth
     const allNodes = root.descendants();
 
-    // Scale to fit
-    const nodeSize = 40;
+    // Compute target positions for each node
+    const targetPositions = new Map<string, { x: number; y: number }>();
+    allNodes.forEach((d: any) => {
+      targetPositions.set(d.data.id, { x: d.y + 150, y: d.x + 40 });
+    });
 
-    // Draw links (from parent to child)
+    // Get center position for default transitions
+    const centerTarget = targetPositions.get(this.graphData.center.id);
+    const defaultX = centerTarget ? centerTarget.x : width / 2;
+    const defaultY = centerTarget ? centerTarget.y : height / 2;
+
+    // Draw links (from parent to child) using adjusted positions
     const treeLinks = g.append("g").attr("class", "tree-links");
 
     treeLinks
@@ -505,39 +677,51 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .append("path")
       .attr("fill", "none")
       .attr("stroke", (d: any) => {
-        // Color based on the type of connection
         const childData = d.target.data as HierarchyDatum;
         if (childData.edgeType === "ANIMATION") return this.COLOR_TERTIARY;
         return this.COLOR_PRIMARY;
       })
-      .attr("stroke-width", 2.5)
-      .attr("stroke-dasharray", (d: any) => {
-        const childData = d.target.data as HierarchyDatum;
-        if (childData.edgeType === "LOGISTICS") return "8,4";
-        return "none";
-      })
+      .attr("stroke-width", 1.5)
+      .attr("opacity", this.savedPositions.size > 0 ? 0 : 1)
       .attr("d", (d: any) => {
-        // Horizontal tree link: curve from source to target
-        const sx = d.source.y + 150;
-        const sy = d.source.x + 40;
-        const tx = d.target.y + 150;
-        const ty = d.target.x + 40;
-        // Use a smooth horizontal curve (cubic bezier)
+        const sourcePos = targetPositions.get(d.source.data.id);
+        const targetPos = targetPositions.get(d.target.data.id);
+        const sx = sourcePos!.x;
+        const sy = sourcePos!.y;
+        const tx = targetPos!.x;
+        const ty = targetPos!.y;
         const midX = (sx + tx) / 2;
         return `M${sx},${sy}C${midX},${sy} ${midX},${ty} ${tx},${ty}`;
       });
 
-    // Draw link midpoint badges
+    // Fade in links during transition
+    if (this.savedPositions.size > 0) {
+      treeLinks
+        .selectAll("path")
+        .transition()
+        .duration(this.TRANSITION_MS * 0.5)
+        .delay(this.TRANSITION_MS * 0.5)
+        .attr("opacity", 1);
+    }
+
+    // Draw link midpoint badges using adjusted positions
     const linkBadges = g.append("g").attr("class", "link-badges");
 
     root.links().forEach((link: any) => {
       const childData = link.target.data as HierarchyDatum;
       // Skip branches (Animation/Logistique) — only show badges on leaf links
-      if (childData.id === "__animation__" || childData.id === "__logistics__")
+      if (
+        childData.id === "__animation__" ||
+        childData.id === "__logistics__" ||
+        childData.id === "__logistics_r1__" ||
+        childData.id === "__logistics_r2__"
+      )
         return;
 
-      const midX = (link.source.y + link.target.y) / 2 + 150;
-      const midY = (link.source.x + link.target.x) / 2 + 40;
+      const sourcePos = targetPositions.get(link.source.data.id);
+      const targetPos = targetPositions.get(link.target.data.id);
+      const midX = (sourcePos!.x + targetPos!.x) / 2;
+      const midY = (sourcePos!.y + targetPos!.y) / 2;
 
       const color =
         childData.edgeType === "ANIMATION"
@@ -582,8 +766,31 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .data(allNodes)
       .enter()
       .append("g")
-      .attr("transform", (d: any) => `translate(${d.y + 150},${d.x + 40})`)
+      .attr("data-node-id", (d: any) => d.data.id)
+      .attr("transform", (d: any) => {
+        const target = targetPositions.get(d.data.id);
+        const startX = this.getSavedPosition(d.data.id, defaultX, defaultY).x;
+        const startY = this.getSavedPosition(d.data.id, defaultX, defaultY).y;
+        return `translate(${startX},${startY})`;
+      })
       .attr("cursor", "pointer");
+
+    // Transition nodes to target positions
+    if (this.savedPositions.size > 0) {
+      nodeGroups
+        .transition()
+        .duration(this.TRANSITION_MS)
+        .ease(d3.easeCubicInOut)
+        .attr("transform", (d: any) => {
+          const target = targetPositions.get(d.data.id);
+          return `translate(${target!.x},${target!.y})`;
+        });
+    } else {
+      nodeGroups.attr("transform", (d: any) => {
+        const target = targetPositions.get(d.data.id);
+        return `translate(${target!.x},${target!.y})`;
+      });
+    }
 
     // Style each node based on its role
     const self = this;
@@ -591,40 +798,57 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const data = d.data as HierarchyDatum;
       const g = d3.select(this);
 
-      // Branch nodes (Animation/Logistique labels)
-      if (data.id === "__animation__" || data.id === "__logistics__") {
+      // Branch nodes (Animation/Logistique/R1-Logistique/R2-Logistique labels)
+      if (
+        data.id === "__animation__" ||
+        data.id === "__logistics__" ||
+        data.id === "__logistics_r1__" ||
+        data.id === "__logistics_r2__"
+      ) {
         const isAnimation = data.id === "__animation__";
+        const isLogisticsMain = data.id === "__logistics__";
+        const isR1Group = data.id === "__logistics_r1__";
+        const label = isAnimation
+          ? "Animation"
+          : isLogisticsMain
+            ? "Logistique"
+            : isR1Group
+              ? "R1"
+              : "R2";
+        const color = isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY;
+        const width = isLogisticsMain ? 100 : 60;
+        const height = isLogisticsMain ? 28 : 22;
+        const fontSize = isLogisticsMain ? "11px" : "10px";
+        const fontWeight = isLogisticsMain ? "600" : "700";
+
         g.append("rect")
           .attr("rx", 6)
           .attr("ry", 6)
-          .attr("width", 100)
-          .attr("height", 28)
-          .attr("x", -50)
-          .attr("y", -14)
+          .attr("width", width)
+          .attr("height", height)
+          .attr("x", -width / 2)
+          .attr("y", -height / 2)
           .attr("fill", "white");
 
         g.append("rect")
           .attr("rx", 6)
           .attr("ry", 6)
-          .attr("width", 100)
-          .attr("height", 28)
-          .attr("x", -50)
-          .attr("y", -14)
-          .attr("fill", isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY)
+          .attr("width", width)
+          .attr("height", height)
+          .attr("x", -width / 2)
+          .attr("y", -height / 2)
+          .attr("fill", color)
           .attr("fill-opacity", 0.15)
-          .attr(
-            "stroke",
-            isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY,
-          )
+          .attr("stroke", color)
           .attr("stroke-width", 1.5);
 
         g.append("text")
           .attr("text-anchor", "middle")
           .attr("dy", "0.35em")
-          .attr("font-size", "11px")
-          .attr("font-weight", "600")
-          .attr("fill", isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY)
-          .text(data.label);
+          .attr("font-size", fontSize)
+          .attr("font-weight", fontWeight)
+          .attr("fill", color)
+          .text(label);
         return;
       }
 
@@ -692,7 +916,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("fill", self.COLOR_ON_SECONDARY_CONTAINER);
     });
 
-    this.setupAutoZoomAndResize(svg, g, zoom, containerEl, null, false);
+    this.setupAutoZoomAndResize(
+      svg,
+      g,
+      this.zoomBehavior!,
+      containerEl,
+      null,
+      false,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -706,26 +937,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const width = containerEl.clientWidth;
     const height = containerEl.clientHeight;
 
-    d3.select(containerEl).select("svg").remove();
-
-    const svg = d3
-      .select(containerEl)
-      .append("svg")
-      .attr("width", width)
-      .attr("height", height);
-
-    const defs = svg.append("defs");
-    this.addArrowMarkers(defs);
-
-    const g = svg.append("g");
-
-    const zoom = d3
-      .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 3])
-      .on("zoom", (event) => {
-        g.attr("transform", event.transform.toString());
-      });
-    svg.call(zoom);
+    // Use persistent SVG
+    const svg = this.svg!;
+    const g = this.g!;
 
     // Build hierarchy for radial tree
     const hierarchyData = this.buildHierarchy();
@@ -744,6 +958,18 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const cx = width / 2;
     const cy = height / 2;
 
+    // Compute target positions for each node
+    const targetPositions = new Map<string, { x: number; y: number }>();
+    root.descendants().forEach((d: any) => {
+      targetPositions.set(d.data.id, {
+        x: cx + d.y * Math.cos(d.x - Math.PI / 2),
+        y: cy + d.y * Math.sin(d.x - Math.PI / 2),
+      });
+    });
+
+    const defaultX = cx;
+    const defaultY = cy;
+
     // Draw radial links
     const radialLinks = g.append("g").attr("class", "radial-links");
 
@@ -758,21 +984,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
         if (childData.edgeType === "ANIMATION") return this.COLOR_TERTIARY;
         return this.COLOR_PRIMARY;
       })
-      .attr("stroke-width", 2)
-      .attr("stroke-dasharray", (d: any) => {
-        const childData = d.target.data as HierarchyDatum;
-        if (childData.edgeType === "LOGISTICS") return "8,4";
-        return "none";
-      })
+      .attr("stroke-width", 1.5)
+      .attr("opacity", this.savedPositions.size > 0 ? 0 : 1)
       .attr("d", (d: any) => {
-        // Manual radial link path
         const sx = cx + d.source.y * Math.cos(d.source.x - Math.PI / 2);
         const sy = cy + d.source.y * Math.sin(d.source.x - Math.PI / 2);
         const tx = cx + d.target.y * Math.cos(d.target.x - Math.PI / 2);
         const ty = cy + d.target.y * Math.sin(d.target.x - Math.PI / 2);
-        const mx = (sx + tx) / 2;
-        const my = (sy + ty) / 2;
-        // Use a quadratic curve for smooth radial links
         const sourceR = d.source.y;
         const targetR = d.target.y;
         const midR = (sourceR + targetR) / 2;
@@ -782,12 +1000,27 @@ export class GraphComponent implements OnChanges, OnDestroy {
         return `M${sx},${sy}Q${cmx},${cmy} ${tx},${ty}`;
       });
 
+    // Fade in links during transition
+    if (this.savedPositions.size > 0) {
+      radialLinks
+        .selectAll("path")
+        .transition()
+        .duration(this.TRANSITION_MS * 0.5)
+        .delay(this.TRANSITION_MS * 0.5)
+        .attr("opacity", 1);
+    }
+
     // Draw link badges
     const linkBadges = g.append("g").attr("class", "link-badges");
 
     root.links().forEach((link: any) => {
       const childData = link.target.data as HierarchyDatum;
-      if (childData.id === "__animation__" || childData.id === "__logistics__")
+      if (
+        childData.id === "__animation__" ||
+        childData.id === "__logistics__" ||
+        childData.id === "__logistics_r1__" ||
+        childData.id === "__logistics_r2__"
+      )
         return;
 
       const midAngle = (link.source.x + link.target.x) / 2;
@@ -838,12 +1071,29 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .data(root.descendants())
       .enter()
       .append("g")
-      .attr(
-        "transform",
-        (d: any) =>
-          `translate(${cx + d.y * Math.cos(d.x - Math.PI / 2)},${cy + d.y * Math.sin(d.x - Math.PI / 2)})`,
-      )
+      .attr("data-node-id", (d: any) => d.data.id)
+      .attr("transform", (d: any) => {
+        const start = this.getSavedPosition(d.data.id, defaultX, defaultY);
+        return `translate(${start.x},${start.y})`;
+      })
       .attr("cursor", "pointer");
+
+    // Transition nodes to target positions
+    if (this.savedPositions.size > 0) {
+      nodeGroups
+        .transition()
+        .duration(this.TRANSITION_MS)
+        .ease(d3.easeCubicInOut)
+        .attr("transform", (d: any) => {
+          const target = targetPositions.get(d.data.id);
+          return `translate(${target!.x},${target!.y})`;
+        });
+    } else {
+      nodeGroups.attr("transform", (d: any) => {
+        const target = targetPositions.get(d.data.id);
+        return `translate(${target!.x},${target!.y})`;
+      });
+    }
 
     // Style each node based on its role
     const self = this;
@@ -852,30 +1102,56 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const g = d3.select(this);
 
       // Branch nodes
-      if (data.id === "__animation__" || data.id === "__logistics__") {
+      if (
+        data.id === "__animation__" ||
+        data.id === "__logistics__" ||
+        data.id === "__logistics_r1__" ||
+        data.id === "__logistics_r2__"
+      ) {
         const isAnimation = data.id === "__animation__";
+        const isLogisticsMain = data.id === "__logistics__";
+        const isR1Group = data.id === "__logistics_r1__";
+        const label = isAnimation
+          ? "Animation"
+          : isLogisticsMain
+            ? "Logistique"
+            : isR1Group
+              ? "R1"
+              : "R2";
+        const color = isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY;
+        const width = isLogisticsMain ? 90 : 50;
+        const height = isLogisticsMain ? 24 : 20;
+        const fontSize = isLogisticsMain ? "10px" : "9px";
+        const fontWeight = isLogisticsMain ? "600" : "700";
+
         g.append("rect")
           .attr("rx", 6)
           .attr("ry", 6)
-          .attr("width", 90)
-          .attr("height", 24)
-          .attr("x", -45)
-          .attr("y", -12)
-          .attr("fill", isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY)
+          .attr("width", width)
+          .attr("height", height)
+          .attr("x", -width / 2)
+          .attr("y", -height / 2)
+          .attr("fill", "white");
+
+        g.append("rect")
+          .attr("rx", 6)
+          .attr("ry", 6)
+          .attr("width", width)
+          .attr("height", height)
+          .attr("x", -width / 2)
+          .attr("y", -height / 2)
+          .attr("fill", color)
           .attr("fill-opacity", 0.15)
-          .attr(
-            "stroke",
-            isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY,
-          )
+          .attr("stroke", color)
           .attr("stroke-width", 1.5);
 
         g.append("text")
           .attr("text-anchor", "middle")
           .attr("dy", "0.35em")
-          .attr("font-size", "10px")
-          .attr("font-weight", "600")
-          .attr("fill", isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY)
-          .text(data.label);
+          .attr("font-size", fontSize)
+          .attr("font-weight", fontWeight)
+          .attr("fill", color)
+          .text(label);
         return;
       }
 
@@ -939,7 +1215,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("fill", self.COLOR_ON_SECONDARY_CONTAINER);
     });
 
-    this.setupAutoZoomAndResize(svg, g, zoom, containerEl, null, false);
+    this.setupAutoZoomAndResize(
+      svg,
+      g,
+      this.zoomBehavior!,
+      containerEl,
+      null,
+      false,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -953,26 +1236,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const width = containerEl.clientWidth;
     const height = containerEl.clientHeight;
 
-    d3.select(containerEl).select("svg").remove();
-
-    const svg = d3
-      .select(containerEl)
-      .append("svg")
-      .attr("width", width)
-      .attr("height", height);
-
-    const defs = svg.append("defs");
-    this.addArrowMarkers(defs);
-
-    const g = svg.append("g");
-
-    const zoom = d3
-      .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.3, 3])
-      .on("zoom", (event) => {
-        g.attr("transform", event.transform.toString());
-      });
-    svg.call(zoom);
+    // Use persistent SVG
+    const svg = this.svg!;
+    const g = this.g!;
 
     const simNodes: SimNode[] = this.graphData.nodes.map((n) => ({
       id: n.id,
@@ -998,10 +1264,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const cy = height / 2;
 
     // Pin center
-    centerNode.fx = cx;
-    centerNode.fy = cy;
-    centerNode.x = cx;
-    centerNode.y = cy;
+    const savedCenter = this.savedPositions.get(centerNode.id);
+    centerNode.fx = savedCenter ? savedCenter.x : cx;
+    centerNode.fy = savedCenter ? savedCenter.y : cy;
+    centerNode.x = centerNode.fx;
+    centerNode.y = centerNode.fy;
 
     // Separate R1 and R2 nodes into arcs
     const neighbors = simNodes.filter(
@@ -1021,10 +1288,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
           r1CenterAngle -
           r1Spread / 2 +
           (r1Nodes.length === 1 ? 0 : (r1Spread * i) / (r1Nodes.length - 1));
-        n.x = cx + groupRadius * Math.cos(angle);
-        n.y = cy + groupRadius * Math.sin(angle);
-        n.fx = n.x;
-        n.fy = n.y;
+        const targetX = cx + groupRadius * Math.cos(angle);
+        const targetY = cy + groupRadius * Math.sin(angle);
+        const saved = this.savedPositions.get(n.id);
+        n.x = saved ? saved.x : targetX;
+        n.y = saved ? saved.y : targetY;
+        n.fx = targetX;
+        n.fy = targetY;
       });
     }
 
@@ -1037,10 +1307,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
           r2CenterAngle -
           r2Spread / 2 +
           (r2Nodes.length === 1 ? 0 : (r2Spread * i) / (r2Nodes.length - 1));
-        n.x = cx + groupRadius * Math.cos(angle);
-        n.y = cy + groupRadius * Math.sin(angle);
-        n.fx = n.x;
-        n.fy = n.y;
+        const targetX = cx + groupRadius * Math.cos(angle);
+        const targetY = cy + groupRadius * Math.sin(angle);
+        const saved = this.savedPositions.get(n.id);
+        n.x = saved ? saved.x : targetX;
+        n.y = saved ? saved.y : targetY;
+        n.fx = targetX;
+        n.fy = targetY;
       });
     }
 
@@ -1084,6 +1357,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .data(simNodes.filter((n) => n.id !== this.graphData!.center.id))
       .enter()
       .append("g")
+      .attr("data-node-id", (d) => d.id)
       .attr("transform", (d) => `translate(${d.x},${d.y})`)
       .attr("cursor", "pointer");
 
@@ -1102,6 +1376,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const centerNodeEl: any = g
       .append("g")
       .attr("class", "center-node")
+      .attr("data-node-id", centerNode.id)
       .datum(centerNode)
       .attr("transform", `translate(${centerNode.x},${centerNode.y})`);
 
@@ -1151,7 +1426,73 @@ export class GraphComponent implements OnChanges, OnDestroy {
     edgePaths.attr("d", computePath);
     this.updateEdgeLabelsOnce(edgeLabels, simLinks, parallelCounts);
 
-    this.setupAutoZoomAndResize(svg, g, zoom, containerEl, centerNode, false);
+    // ── Transition neighbor nodes to target positions ──
+    if (this.savedPositions.size > 0) {
+      neighborNodes
+        .transition()
+        .duration(this.TRANSITION_MS)
+        .ease(d3.easeCubicInOut)
+        .attr("transform", (d: SimNode) => `translate(${d.fx},${d.fy})`);
+
+      centerNodeEl
+        .transition()
+        .duration(this.TRANSITION_MS)
+        .ease(d3.easeCubicInOut)
+        .attr("transform", `translate(${centerNode.fx},${centerNode.fy})`);
+
+      // Update edges and labels after transition
+      neighborNodes.on("end", null); // Clear any previous handlers
+
+      // Transition edges opacity
+      edgePaths
+        .attr("opacity", 0)
+        .transition()
+        .duration(this.TRANSITION_MS * 0.5)
+        .delay(this.TRANSITION_MS * 0.5)
+        .attr("opacity", 1);
+
+      // Recompute paths at the end of node transition
+      setTimeout(() => {
+        neighborNodes.attr(
+          "transform",
+          (d: SimNode) => `translate(${d.fx},${d.fy})`,
+        );
+        centerNodeEl.attr(
+          "transform",
+          `translate(${centerNode.fx},${centerNode.fy})`,
+        );
+        // Update node positions for path computation
+        simNodes.forEach((n) => {
+          if (n.fx !== null) {
+            n.x = n.fx;
+          }
+          if (n.fy !== null) {
+            n.y = n.fy;
+          }
+        });
+        edgePaths.attr("d", computePath);
+        this.updateEdgeLabelsOnce(edgeLabels, simLinks, parallelCounts);
+      }, this.TRANSITION_MS);
+    } else {
+      // No transition needed — positions are already set
+      simNodes.forEach((n) => {
+        if (n.fx !== null) {
+          n.x = n.fx;
+        }
+        if (n.fy !== null) {
+          n.y = n.fy;
+        }
+      });
+    }
+
+    this.setupAutoZoomAndResize(
+      svg,
+      g,
+      this.zoomBehavior!,
+      containerEl,
+      centerNode,
+      false,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1185,6 +1526,20 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M0,-4L8,0L0,4")
+      .attr("fill", this.COLOR_PRIMARY);
+
+    // Reversed arrow for logistics: points opposite to path direction (towards source)
+    defs
+      .append("marker")
+      .attr("id", "arrow-logistics-rev")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 2)
+      .attr("refY", 0)
+      .attr("markerWidth", 7)
+      .attr("markerHeight", 7)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M8,-4L0,0L8,4")
       .attr("fill", this.COLOR_PRIMARY);
   }
 
@@ -1277,15 +1632,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("stroke", (d: SimLink) =>
         d.edgeType === "ANIMATION" ? this.COLOR_TERTIARY : this.COLOR_PRIMARY,
       )
-      .attr("stroke-width", 3)
-      .attr("stroke-dasharray", (d: SimLink) =>
-        d.edgeType === "LOGISTICS" ? "12,6" : "none",
-      )
+      .attr("stroke-width", 1.5)
       .attr("stroke-linecap", "round")
       .attr("marker-end", (d: SimLink) =>
-        d.edgeType === "ANIMATION"
-          ? "url(#arrow-animation)"
-          : "url(#arrow-logistics)",
+        d.edgeType === "ANIMATION" ? "url(#arrow-animation)" : null,
+      )
+      .attr("marker-start", (d: SimLink) =>
+        d.edgeType === "LOGISTICS" ? "url(#arrow-logistics-rev)" : null,
       );
   }
 
@@ -1333,7 +1686,10 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const targetNode = d.target as SimNode;
         const typeLabel =
           d.edgeType === "ANIMATION" ? "Animation (Ventes)" : "Logistique";
-        const text = `${typeLabel}: ${sourceNode.label} → ${targetNode.label}`;
+        const text =
+          d.edgeType === "LOGISTICS"
+            ? `${typeLabel}: ${targetNode.label} → ${sourceNode.label}`
+            : `${typeLabel}: ${sourceNode.label} → ${targetNode.label}`;
 
         const midX = (sourceNode.x! + targetNode.x!) / 2;
         const midY = (sourceNode.y! + targetNode.y!) / 2;
@@ -1477,11 +1833,23 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const dy = ty - sy;
     const len = Math.sqrt(dx * dx + dy * dy) || 1;
 
+    // For logistics: arrow points towards source (SITE), so shorten at source end
+    // For animation: arrow points towards target (R1), so shorten at target end
+    const isLogistics = d.edgeType === "LOGISTICS";
+
     if (total <= 1) {
-      const tr = targetRadius(d.targetId);
-      const ex = tx - (dx / len) * tr;
-      const ey = ty - (dy / len) * tr;
-      return `M${sx},${sy}L${ex},${ey}`;
+      if (isLogistics) {
+        // Shorten at source end for reversed arrow
+        const sr = this.NODE_RADIUS[src.type] || 22;
+        const startX = sx + (dx / len) * sr;
+        const startY = sy + (dy / len) * sr;
+        return `M${startX},${startY}L${tx},${ty}`;
+      } else {
+        const tr = targetRadius(d.targetId);
+        const ex = tx - (dx / len) * tr;
+        const ey = ty - (dy / len) * tr;
+        return `M${sx},${sy}L${ex},${ey}`;
+      }
     }
 
     const mx = (sx + tx) / 2;
@@ -1491,14 +1859,24 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const cx = mx + px * offset;
     const cy = my + py * offset;
 
-    const tdx = tx - cx;
-    const tdy = ty - cy;
-    const tlen = Math.sqrt(tdx * tdx + tdy * tdy) || 1;
-    const tr = targetRadius(d.targetId);
-    const ex = tx - (tdx / tlen) * tr;
-    const ey = ty - (tdy / tlen) * tr;
-
-    return `M${sx},${sy}Q${cx},${cy} ${ex},${ey}`;
+    if (isLogistics) {
+      // Shorten at source end for reversed arrow
+      const sr = this.NODE_RADIUS[src.type] || 22;
+      const sdx = cx - sx;
+      const sdy = cy - sy;
+      const slen = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
+      const startX = sx + (sdx / slen) * sr;
+      const startY = sy + (sdy / slen) * sr;
+      return `M${startX},${startY}Q${cx},${cy} ${tx},${ty}`;
+    } else {
+      const tdx = tx - cx;
+      const tdy = ty - cy;
+      const tlen = Math.sqrt(tdx * tdx + tdy * tdy) || 1;
+      const tr = targetRadius(d.targetId);
+      const ex = tx - (tdx / tlen) * tr;
+      const ey = ty - (tdy / tlen) * tr;
+      return `M${sx},${sy}Q${cx},${cy} ${ex},${ey}`;
+    }
   }
 
   private updateEdgeLabelsForce(

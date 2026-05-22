@@ -78,8 +78,8 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
           class="flex items-center gap-2 w-full text-left group cursor-pointer rounded px-1 py-0.5"
         >
           <span
-            class="inline-block w-5 border-t-2 border-dashed rounded group-hover:w-6 transition-all"
-            style="border-color: #978B7F;"
+            class="inline-block w-5 h-0.5 rounded-full group-hover:w-6 transition-all"
+            style="background-color: #978B7F;"
           ></span>
           <span
             class="text-gray-700 group-hover:text-gray-900 transition-colors"
