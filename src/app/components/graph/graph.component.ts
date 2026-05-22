@@ -1728,16 +1728,31 @@ export class GraphComponent implements OnChanges, OnDestroy {
       });
 
       // Build ancestor and descendant maps
+      // NOTE: a node id may appear multiple times in the hierarchy (e.g. r1-6
+      // under both Animation and Logistics branches). We MERGE ancestors/descendants
+      // so all paths to the node are highlighted.
       const ancestorMap = new Map<string, Set<string>>();
       const descendantMap = new Map<string, Set<string>>();
       root.descendants().forEach((d: any) => {
+        const id = d.data.id;
+
         const ancestorIds = new Set<string>();
         d.ancestors().forEach((a: any) => ancestorIds.add(a.data.id));
-        ancestorMap.set(d.data.id, ancestorIds);
+        const existingAncestors = ancestorMap.get(id);
+        if (existingAncestors) {
+          ancestorIds.forEach((a) => existingAncestors.add(a));
+        } else {
+          ancestorMap.set(id, ancestorIds);
+        }
 
         const descendantIds = new Set<string>();
         d.descendants().forEach((a: any) => descendantIds.add(a.data.id));
-        descendantMap.set(d.data.id, descendantIds);
+        const existingDescendants = descendantMap.get(id);
+        if (existingDescendants) {
+          descendantIds.forEach((a) => existingDescendants.add(a));
+        } else {
+          descendantMap.set(id, descendantIds);
+        }
       });
 
       const ancestors = ancestorMap.get(selectedId) || new Set<string>();
@@ -2123,16 +2138,30 @@ export class GraphComponent implements OnChanges, OnDestroy {
     targetPositions: Map<string, { x: number; y: number }>,
   ): void {
     // Build ancestor and descendant maps for hover highlighting
+    // NOTE: merge duplicates so nodes appearing under multiple branches
+    // (e.g. r1-6 under Animation + Logistics) have all paths highlighted.
     const ancestorMap = new Map<string, Set<string>>();
     const descendantMap = new Map<string, Set<string>>();
     hierarchyRoot.descendants().forEach((d: any) => {
+      const id = d.data.id;
+
       const ancestorIds = new Set<string>();
       d.ancestors().forEach((a: any) => ancestorIds.add(a.data.id));
-      ancestorMap.set(d.data.id, ancestorIds);
+      const existingAncestors = ancestorMap.get(id);
+      if (existingAncestors) {
+        ancestorIds.forEach((a) => existingAncestors.add(a));
+      } else {
+        ancestorMap.set(id, ancestorIds);
+      }
 
       const descendantIds = new Set<string>();
       d.descendants().forEach((a: any) => descendantIds.add(a.data.id));
-      descendantMap.set(d.data.id, descendantIds);
+      const existingDescendants = descendantMap.get(id);
+      if (existingDescendants) {
+        descendantIds.forEach((a) => existingDescendants.add(a));
+      } else {
+        descendantMap.set(id, descendantIds);
+      }
     });
 
     // Node hover: highlight chain to root and subtree
