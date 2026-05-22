@@ -691,7 +691,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
         return `M${sx},${sy}C${midX},${sy} ${midX},${ty} ${tx},${ty}`;
       })
       .attr("data-source-id", (d: any) => d.source.data.id)
-      .attr("data-target-id", (d: any) => d.target.data.id);
+      .attr("data-target-id", (d: any) => d.target.data.id)
+      .attr("data-edge-type", (d: any) => {
+        const childData = d.target.data as HierarchyDatum;
+        return childData.edgeType || "LOGISTICS";
+      });
 
     // Draw link midpoint badges using adjusted positions
     const linkBadges = g.append("g").attr("class", "link-badges");
@@ -724,6 +728,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const badgeG = linkBadges
         .append("g")
         .attr("data-target-id", childData.id)
+        .attr("data-edge-type", childData.edgeType || "LOGISTICS")
         .attr("transform", `translate(${midX},${midY})`);
 
       badgeG.append("rect").attr("rx", 6).attr("ry", 6).attr("fill", "white");
@@ -1354,7 +1359,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
         d.edgeType === "LOGISTICS" ? "url(#arrow-logistics-rev)" : null,
       )
       .attr("data-source-id", (d: SimLink) => d.sourceId)
-      .attr("data-target-id", (d: SimLink) => d.targetId);
+      .attr("data-target-id", (d: SimLink) => d.targetId)
+      .attr("data-edge-type", (d: SimLink) => d.edgeType);
   }
 
   private createEdgeLabels(
@@ -1370,7 +1376,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .append("g")
       .attr("class", "edge-label")
       .attr("data-source-id", (d: SimLink) => d.sourceId)
-      .attr("data-target-id", (d: SimLink) => d.targetId);
+      .attr("data-target-id", (d: SimLink) => d.targetId)
+      .attr("data-edge-type", (d: SimLink) => d.edgeType);
 
     edgeLabels.append("rect").attr("rx", 6).attr("ry", 6).attr("fill", "white");
 
@@ -1503,15 +1510,41 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("stroke-opacity", 0.4);
       });
 
-      // Reset link colors
-      g.selectAll(".edges path").each(function () {
+      // Reset link colors to default
+      g.selectAll(".edges path, .tree-links path").each(function () {
         const el = d3.select(this);
         const edgeType = el.attr("data-edge-type");
-        if (edgeType === "ANIMATION") {
-          el.attr("stroke", COLOR_TERTIARY);
-        } else {
-          el.attr("stroke", COLOR_PRIMARY);
-        }
+        el.attr(
+          "stroke",
+          edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+        );
+      });
+
+      // Reset edge labels to default colors
+      g.selectAll(".edge-labels g").each(function () {
+        const el = d3.select(this);
+        const edgeType = el.attr("data-edge-type");
+        const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+        el.select("rect:first-of-type").attr("fill", "white");
+        el.select(".label-bg")
+          .attr("fill", color)
+          .attr("fill-opacity", "0.15")
+          .attr("stroke", color);
+        el.selectAll("text").attr("fill", color);
+      });
+
+      // Reset tree link badges to default colors
+      g.selectAll(".link-badges g").each(function () {
+        const badgeG = d3.select(this);
+        const edgeType = badgeG.attr("data-edge-type");
+        const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+        badgeG.select("rect:first-of-type").attr("fill", "white");
+        badgeG
+          .select("rect:last-of-type")
+          .attr("fill", color)
+          .attr("fill-opacity", "0.15")
+          .attr("stroke", color);
+        badgeG.select("text").attr("fill", color);
       });
 
       return;
@@ -1519,6 +1552,15 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     const selectedId = this.selectedNodeId;
     const centerId = this.graphData.center.id;
+
+    // Helper: determine if a link/badge is connected to the selected node
+    const isConnected = (
+      sourceId: string | null,
+      targetId: string | null,
+    ): boolean =>
+      !!sourceId &&
+      !!targetId &&
+      (sourceId === selectedId || targetId === selectedId);
 
     if (this.layoutMode === "tree") {
       // Hierarchy modes: highlight ancestors + descendants
@@ -1555,26 +1597,60 @@ export class GraphComponent implements OnChanges, OnDestroy {
         return nodeId && highlighted.has(nodeId) ? 1 : 0.25;
       });
 
-      const linkClass =
-        this.layoutMode === "tree" ? ".tree-links path" : ".edges path";
-      g.selectAll(linkClass).attr("opacity", function () {
+      g.selectAll(".tree-links path").each(function () {
         const el = d3.select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
-        return sourceId &&
+        const connected =
+          sourceId &&
           targetId &&
           highlighted.has(sourceId) &&
-          highlighted.has(targetId)
-          ? 1
-          : 0.12;
+          highlighted.has(targetId);
+        el.attr("opacity", connected ? 1 : 0.12);
+        // All links in the highlighted path use Electric color
+        if (connected) {
+          el.attr("stroke", COLOR_ELECTRIC);
+        } else {
+          const edgeType = el.attr("data-edge-type");
+          el.attr(
+            "stroke",
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+          );
+        }
       });
 
-      g.selectAll(".link-badges g").attr("opacity", function () {
-        const targetId = d3.select(this).attr("data-target-id");
-        return targetId && highlighted.has(targetId) ? 1 : 0.12;
+      g.selectAll(".link-badges g").each(function () {
+        const badgeG = d3.select(this);
+        const targetId = badgeG.attr("data-target-id");
+        const connected = targetId && highlighted.has(targetId);
+        // Only highlight badges whose target is a leaf in the selected path
+        const isOnSelectedPath =
+          connected && (targetId === selectedId || ancestors.has(targetId));
+        badgeG.attr("opacity", connected ? 1 : 0.12);
+        if (isOnSelectedPath) {
+          // Electric colors for badges on the selected path
+          badgeG.select("rect:first-of-type").attr("fill", "white");
+          badgeG
+            .select("rect:last-of-type")
+            .attr("fill", COLOR_ELECTRIC)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", COLOR_ELECTRIC);
+          badgeG.select("text").attr("fill", COLOR_ELECTRIC);
+        } else {
+          const edgeType = badgeG.attr("data-edge-type");
+          const color =
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+          badgeG.select("rect:first-of-type").attr("fill", "white");
+          badgeG
+            .select("rect:last-of-type")
+            .attr("fill", color)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", color);
+          badgeG.select("text").attr("fill", color);
+        }
       });
     } else {
-      // Force/Pack modes: highlight connected edges
+      // Force mode: highlight connected edges
       const connectedNodeIds = new Set<string>([selectedId, centerId]);
       this.graphData.edges.forEach((edge) => {
         if (edge.source === selectedId || edge.target === selectedId) {
@@ -1588,20 +1664,49 @@ export class GraphComponent implements OnChanges, OnDestroy {
         return nodeId && connectedNodeIds.has(nodeId) ? 1 : 0.25;
       });
 
-      g.selectAll(".edges path").attr("opacity", function () {
+      g.selectAll(".edges path").each(function () {
         const el = d3.select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
-        if (!sourceId || !targetId) return 0.12;
-        return sourceId === selectedId || targetId === selectedId ? 1 : 0.12;
+        const connected = isConnected(sourceId, targetId);
+        el.attr("opacity", connected ? 1 : 0.12);
+        // Connected links use Electric color; others keep default
+        if (connected) {
+          el.attr("stroke", COLOR_ELECTRIC);
+        } else {
+          const edgeType = el.attr("data-edge-type");
+          el.attr(
+            "stroke",
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+          );
+        }
       });
 
-      g.selectAll(".edge-labels g").attr("opacity", function () {
+      g.selectAll(".edge-labels g").each(function () {
         const el = d3.select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
-        if (!sourceId || !targetId) return 0.12;
-        return sourceId === selectedId || targetId === selectedId ? 1 : 0.12;
+        const connected = isConnected(sourceId, targetId);
+        el.attr("opacity", connected ? 1 : 0.12);
+        if (connected) {
+          // Electric colors for connected labels
+          el.select("rect:first-of-type").attr("fill", "white");
+          el.select(".label-bg")
+            .attr("fill", COLOR_ELECTRIC)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", COLOR_ELECTRIC);
+          el.selectAll("text").attr("fill", COLOR_ELECTRIC);
+        } else {
+          const edgeType = el.attr("data-edge-type");
+          const color =
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+          el.select("rect:first-of-type").attr("fill", "white");
+          el.select(".label-bg")
+            .attr("fill", color)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", color);
+          el.selectAll("text").attr("fill", color);
+        }
       });
     }
 
@@ -1958,6 +2063,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     simLinks: SimLink[],
     parallelCounts: Map<string, number>,
   ): void {
+    const selectedId = this.selectedNodeId;
     edgeLabels.each(function (d: SimLink) {
       const src = d.source as SimNode;
       const tgt = d.target as SimNode;
@@ -2002,6 +2108,25 @@ export class GraphComponent implements OnChanges, OnDestroy {
       }
 
       const color = d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+
+      // If a node is selected, use Electric color for connected edges
+      if (selectedId) {
+        const isSelectedEdge =
+          d.sourceId === selectedId || d.targetId === selectedId;
+        if (isSelectedEdge) {
+          // White background rect (first)
+          el.select("rect:first-of-type").attr("fill", "white");
+
+          // Colored overlay rect (second / label-bg) — Electric
+          el.select(".label-bg")
+            .attr("fill", COLOR_ELECTRIC)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", COLOR_ELECTRIC)
+            .attr("stroke-width", "1.5");
+          el.selectAll("text").attr("fill", COLOR_ELECTRIC);
+          return;
+        }
+      }
 
       // White background rect (first)
       el.select("rect:first-of-type").attr("fill", "white");
