@@ -6,6 +6,7 @@ export interface Node {
   id: string;
   label: string;
   type: NodeType;
+  sigmpr?: string;
 }
 
 export type EdgeType = "ANIMATION" | "LOGISTICS";
@@ -14,6 +15,7 @@ export interface Edge {
   source: string;
   target: string;
   type: EdgeType;
+  dmsId?: string;
 }
 
 export interface GraphData {
