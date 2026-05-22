@@ -90,11 +90,22 @@ export class GraphComponent implements OnChanges, OnDestroy {
   // Selected node (click to select, click again to deselect)
   private selectedNodeId: string | null = null;
 
+  // Transition duration for selection animations (ms)
+  private readonly SELECTION_TRANSITION_MS = 250;
+
+  // Electric current animation timer
+  private selectionAnimTimer: d3.Timer | null = null;
+  private readonly ELECTRIC_DASH = "10 4 4 4"; // dasharray pattern
+  private readonly ELECTRIC_DASH_PERIOD = 22; // total period of dasharray
+  private readonly ELECTRIC_FLOW_DURATION = 800; // ms for one full cycle
+  private readonly ELECTRIC_COLOR_WAVE_DURATION = 2000; // ms for color oscillation
+
   ngOnChanges(changes: SimpleChanges): void {
     if (!this.graphData) return;
 
     if (changes["graphData"]) {
       // Data changed → full rebuild
+      this.stopElectricAnimation();
       this.destroySvg();
       this.savedPositions.clear();
       this.collapsedBranches.clear();
@@ -102,6 +113,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       this.renderGraph();
     } else if (changes["layoutMode"]) {
       // Layout changed → smooth transition
+      this.stopElectricAnimation();
       this.saveNodePositions();
       this.stopSimulation();
       this.renderGraph();
@@ -109,6 +121,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.stopElectricAnimation();
     this.destroySvg();
   }
 
@@ -1217,6 +1230,37 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .append("path")
       .attr("d", "M8,-4L0,0L8,4")
       .attr("fill", COLOR_PRIMARY);
+
+    // ── Electric glow filter for selection animation ──
+    // Wide blur = visible "wire" underneath, narrow blur = close glow, original = "current pulses"
+    defs
+      .append("filter")
+      .attr("id", "electric-glow")
+      .attr("x", "-10%")
+      .attr("y", "-100%")
+      .attr("width", "120%")
+      .attr("height", "300%")
+      .call((f) => {
+        f.append("feGaussianBlur")
+          .attr("in", "SourceGraphic")
+          .attr("stdDeviation", 5)
+          .attr("result", "wire");
+        f.append("feComponentTransfer")
+          .attr("in", "wire")
+          .attr("result", "dimWire")
+          .call((ct) =>
+            ct.append("feFuncA").attr("type", "linear").attr("slope", 0.35),
+          );
+        f.append("feGaussianBlur")
+          .attr("in", "SourceGraphic")
+          .attr("stdDeviation", 1.5)
+          .attr("result", "glow");
+        f.append("feMerge").call((m) => {
+          m.append("feMergeNode").attr("in", "dimWire");
+          m.append("feMergeNode").attr("in", "glow");
+          m.append("feMergeNode").attr("in", "SourceGraphic");
+        });
+      });
   }
 
   private drawNodeCircles(
@@ -1467,6 +1511,69 @@ export class GraphComponent implements OnChanges, OnDestroy {
       });
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // ELECTRIC CURRENT ANIMATION
+  // ═══════════════════════════════════════════════════════════════════
+
+  private startElectricAnimation(): void {
+    this.stopElectricAnimation();
+    if (!this.g) return;
+
+    const animatedPaths = this.g
+      .selectAll(".edges path, .tree-links path")
+      .filter(function () {
+        return d3.select(this).classed("electric-current");
+      });
+
+    if (animatedPaths.empty()) return;
+
+    // Apply dasharray and glow filter directly (D3 bypasses Angular encapsulation)
+    animatedPaths
+      .attr("stroke-dasharray", this.ELECTRIC_DASH)
+      .attr("stroke-linecap", "round")
+      .attr("filter", "url(#electric-glow)");
+
+    const period = this.ELECTRIC_DASH_PERIOD;
+    const flowMs = this.ELECTRIC_FLOW_DURATION;
+    const colorMs = this.ELECTRIC_COLOR_WAVE_DURATION;
+    const colorInterp = d3.interpolateRgb(COLOR_ELECTRIC, COLOR_TERTIARY);
+
+    this.selectionAnimTimer = d3.timer((elapsed) => {
+      // Dash flow: increasing dashoffset => dashes move from start (R3) to end (target)
+      const dashOffset = ((elapsed / flowMs) * period) % period;
+
+      // Color wave: smooth oscillation Electric ↔ Tertiary
+      const colorPhase = (elapsed % colorMs) / colorMs;
+      const colorT = 0.5 - 0.5 * Math.cos(2 * Math.PI * colorPhase);
+      const color = colorInterp(colorT);
+
+      // Opacity wave: 1.0 ↔ 0.7 (brighter when Electric, dimmer when Tertiary)
+      const strokeOpacity = 1 - 0.3 * colorT;
+
+      animatedPaths
+        .attr("stroke-dashoffset", dashOffset)
+        .attr("stroke", color)
+        .attr("stroke-opacity", strokeOpacity);
+    });
+  }
+
+  private stopElectricAnimation(): void {
+    if (this.selectionAnimTimer) {
+      this.selectionAnimTimer.stop();
+      this.selectionAnimTimer = null;
+    }
+    if (!this.g) return;
+
+    // Remove all electric animation attributes from link paths
+    this.g
+      .selectAll(".edges path, .tree-links path")
+      .attr("stroke-dasharray", null)
+      .attr("stroke-dashoffset", null)
+      .attr("stroke-linecap", null)
+      .attr("filter", null)
+      .attr("stroke-opacity", null);
+  }
+
   private applyNodeSelection(): void {
     if (!this.g || !this.graphData) return;
 
@@ -1474,13 +1581,37 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const g = this.g;
     const allNodes = g.selectAll("[data-node-id]");
 
-    if (!this.selectedNodeId) {
-      // Reset all opacity to 1
-      allNodes.attr("opacity", 1);
-      g.selectAll(".tree-links path, .edges path").attr("opacity", 1);
-      g.selectAll(".link-badges g, .edge-labels g").attr("opacity", 1);
+    const t = this.SELECTION_TRANSITION_MS;
 
-      // Reset node colors to default
+    if (!this.selectedNodeId) {
+      // Stop electric current animation and clean up attributes
+      this.stopElectricAnimation();
+
+      // Reset all opacity to 1 with transition
+      allNodes.interrupt().transition().duration(t).attr("opacity", 1);
+      g.selectAll(".link-badges g, .edge-labels g")
+        .interrupt()
+        .transition()
+        .duration(t)
+        .attr("opacity", 1);
+
+      // Reset link opacity AND stroke colors in a single transition per element
+      // Also stop electric current animation
+      g.selectAll(".edges path, .tree-links path").each(function () {
+        const el = d3.select(this);
+        el.classed("electric-current", false);
+        const edgeType = el.attr("data-edge-type");
+        el.interrupt()
+          .transition()
+          .duration(t)
+          .attr("opacity", 1)
+          .attr(
+            "stroke",
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+          );
+      });
+
+      // Reset node colors to default with transition
       allNodes.each(function () {
         const nodeGroup = d3.select(this);
         const nodeId = nodeGroup.attr("data-node-id");
@@ -1499,52 +1630,73 @@ export class GraphComponent implements OnChanges, OnDestroy {
           return r === "30" || r === "22";
         });
 
-        innerCircle.attr("fill", NODE_COLORS[nodeType]);
-        innerCircle.attr("stroke", NODE_STROKE_COLORS[nodeType]);
+        innerCircle
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("fill", NODE_COLORS[nodeType])
+          .attr("stroke", NODE_STROKE_COLORS[nodeType]);
         circles
           .filter(function () {
             const r = d3.select(this).attr("r");
             return r === "34" || r === "26";
           })
+          .interrupt()
+          .transition()
+          .duration(t)
           .attr("stroke", NODE_STROKE_COLORS[nodeType])
           .attr("stroke-opacity", 0.4);
       });
 
-      // Reset link colors to default
-      g.selectAll(".edges path, .tree-links path").each(function () {
-        const el = d3.select(this);
-        const edgeType = el.attr("data-edge-type");
-        el.attr(
-          "stroke",
-          edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
-        );
-      });
-
-      // Reset edge labels to default colors
+      // Reset edge labels to default colors with transition
       g.selectAll(".edge-labels g").each(function () {
         const el = d3.select(this);
         const edgeType = el.attr("data-edge-type");
         const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-        el.select("rect:first-of-type").attr("fill", "white");
+        el.select("rect:first-of-type")
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("fill", "white");
         el.select(".label-bg")
+          .interrupt()
+          .transition()
+          .duration(t)
           .attr("fill", color)
           .attr("fill-opacity", "0.15")
           .attr("stroke", color);
-        el.selectAll("text").attr("fill", color);
+        el.selectAll("text")
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("fill", color);
       });
 
-      // Reset tree link badges to default colors
+      // Reset tree link badges to default colors with transition
       g.selectAll(".link-badges g").each(function () {
         const badgeG = d3.select(this);
         const edgeType = badgeG.attr("data-edge-type");
         const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-        badgeG.select("rect:first-of-type").attr("fill", "white");
+        badgeG
+          .select("rect:first-of-type")
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("fill", "white");
         badgeG
           .select("rect:last-of-type")
+          .interrupt()
+          .transition()
+          .duration(t)
           .attr("fill", color)
           .attr("fill-opacity", "0.15")
           .attr("stroke", color);
-        badgeG.select("text").attr("fill", color);
+        badgeG
+          .select("text")
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("fill", color);
       });
 
       return;
@@ -1592,10 +1744,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const descendants = descendantMap.get(selectedId) || new Set<string>();
       const highlighted = new Set([...ancestors, ...descendants]);
 
-      allNodes.attr("opacity", function () {
-        const nodeId = d3.select(this).attr("data-node-id");
-        return nodeId && highlighted.has(nodeId) ? 1 : 0.25;
-      });
+      allNodes
+        .interrupt()
+        .transition()
+        .duration(t)
+        .attr("opacity", function () {
+          const nodeId = d3.select(this).attr("data-node-id");
+          return nodeId && highlighted.has(nodeId) ? 1 : 0.25;
+        });
 
       g.selectAll(".tree-links path").each(function () {
         const el = d3.select(this);
@@ -1606,16 +1762,22 @@ export class GraphComponent implements OnChanges, OnDestroy {
           targetId &&
           highlighted.has(sourceId) &&
           highlighted.has(targetId);
-        el.attr("opacity", connected ? 1 : 0.12);
-        // All links in the highlighted path use Electric color
+        const edgeType = el.attr("data-edge-type");
+
         if (connected) {
-          el.attr("stroke", COLOR_ELECTRIC);
+          // CSS animation handles stroke color + dasharray flow
+          el.classed("electric-current", true);
+          el.interrupt().transition().duration(t).attr("opacity", 1);
         } else {
-          const edgeType = el.attr("data-edge-type");
-          el.attr(
-            "stroke",
-            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
-          );
+          el.classed("electric-current", false);
+          el.interrupt()
+            .transition()
+            .duration(t)
+            .attr("opacity", 0.12)
+            .attr(
+              "stroke",
+              edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+            );
         }
       });
 
@@ -1626,27 +1788,57 @@ export class GraphComponent implements OnChanges, OnDestroy {
         // Only highlight badges whose target is a leaf in the selected path
         const isOnSelectedPath =
           connected && (targetId === selectedId || ancestors.has(targetId));
-        badgeG.attr("opacity", connected ? 1 : 0.12);
+        badgeG
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("opacity", connected ? 1 : 0.12);
         if (isOnSelectedPath) {
           // Electric colors for badges on the selected path
-          badgeG.select("rect:first-of-type").attr("fill", "white");
+          badgeG
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
           badgeG
             .select("rect:last-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
             .attr("fill", COLOR_ELECTRIC)
             .attr("fill-opacity", "0.15")
             .attr("stroke", COLOR_ELECTRIC);
-          badgeG.select("text").attr("fill", COLOR_ELECTRIC);
+          badgeG
+            .select("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", COLOR_ELECTRIC);
         } else {
           const edgeType = badgeG.attr("data-edge-type");
           const color =
             edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-          badgeG.select("rect:first-of-type").attr("fill", "white");
+          badgeG
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
           badgeG
             .select("rect:last-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
             .attr("fill", color)
             .attr("fill-opacity", "0.15")
             .attr("stroke", color);
-          badgeG.select("text").attr("fill", color);
+          badgeG
+            .select("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color);
         }
       });
     } else {
@@ -1659,26 +1851,36 @@ export class GraphComponent implements OnChanges, OnDestroy {
         }
       });
 
-      allNodes.attr("opacity", function () {
-        const nodeId = d3.select(this).attr("data-node-id");
-        return nodeId && connectedNodeIds.has(nodeId) ? 1 : 0.25;
-      });
+      allNodes
+        .interrupt()
+        .transition()
+        .duration(t)
+        .attr("opacity", function () {
+          const nodeId = d3.select(this).attr("data-node-id");
+          return nodeId && connectedNodeIds.has(nodeId) ? 1 : 0.25;
+        });
 
       g.selectAll(".edges path").each(function () {
         const el = d3.select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
         const connected = isConnected(sourceId, targetId);
-        el.attr("opacity", connected ? 1 : 0.12);
-        // Connected links use Electric color; others keep default
+        const edgeType = el.attr("data-edge-type");
+
         if (connected) {
-          el.attr("stroke", COLOR_ELECTRIC);
+          // CSS animation handles stroke color + dasharray flow
+          el.classed("electric-current", true);
+          el.interrupt().transition().duration(t).attr("opacity", 1);
         } else {
-          const edgeType = el.attr("data-edge-type");
-          el.attr(
-            "stroke",
-            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
-          );
+          el.classed("electric-current", false);
+          el.interrupt()
+            .transition()
+            .duration(t)
+            .attr("opacity", 0.12)
+            .attr(
+              "stroke",
+              edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+            );
         }
       });
 
@@ -1687,30 +1889,55 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
         const connected = isConnected(sourceId, targetId);
-        el.attr("opacity", connected ? 1 : 0.12);
+        el.interrupt()
+          .transition()
+          .duration(t)
+          .attr("opacity", connected ? 1 : 0.12);
         if (connected) {
           // Electric colors for connected labels
-          el.select("rect:first-of-type").attr("fill", "white");
+          el.select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
           el.select(".label-bg")
+            .interrupt()
+            .transition()
+            .duration(t)
             .attr("fill", COLOR_ELECTRIC)
             .attr("fill-opacity", "0.15")
             .attr("stroke", COLOR_ELECTRIC);
-          el.selectAll("text").attr("fill", COLOR_ELECTRIC);
+          el.selectAll("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", COLOR_ELECTRIC);
         } else {
           const edgeType = el.attr("data-edge-type");
           const color =
             edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-          el.select("rect:first-of-type").attr("fill", "white");
+          el.select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
           el.select(".label-bg")
+            .interrupt()
+            .transition()
+            .duration(t)
             .attr("fill", color)
             .attr("fill-opacity", "0.15")
             .attr("stroke", color);
-          el.selectAll("text").attr("fill", color);
+          el.selectAll("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color);
         }
       });
     }
 
-    // Change colors of selected node to Electric colors
+    // Change colors of selected node to Electric colors with transition
     allNodes.each(function () {
       const nodeGroup = d3.select(this);
       const nodeId = nodeGroup.attr("data-node-id");
@@ -1727,35 +1954,52 @@ export class GraphComponent implements OnChanges, OnDestroy {
       });
 
       if (isSelected && !isCenter) {
-        // Selected R1/R2: use Electric colors
-        innerCircle.attr("fill", COLOR_ELECTRIC_CONTAINER);
-        innerCircle.attr("stroke", COLOR_ELECTRIC);
-        // Also update outer circle
+        // Selected R1/R2: use Electric colors with transition
+        innerCircle
+          .interrupt()
+          .transition()
+          .duration(t)
+          .attr("fill", COLOR_ELECTRIC_CONTAINER)
+          .attr("stroke", COLOR_ELECTRIC);
+        // Also update outer circle with transition
         circles
           .filter(function () {
             const r = d3.select(this).attr("r");
             return r === "34" || r === "26";
           })
+          .interrupt()
+          .transition()
+          .duration(t)
           .attr("stroke", COLOR_ELECTRIC)
           .attr("stroke-opacity", 0.4);
       } else if (!isCenter) {
-        // Reset to default container colors
+        // Reset to default container colors with transition
         const nodeType = self.graphData!.nodes.find(
           (n) => n.id === nodeId,
         )?.type;
         if (nodeType) {
-          innerCircle.attr("fill", NODE_COLORS[nodeType]);
-          innerCircle.attr("stroke", NODE_STROKE_COLORS[nodeType]);
+          innerCircle
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", NODE_COLORS[nodeType])
+            .attr("stroke", NODE_STROKE_COLORS[nodeType]);
           circles
             .filter(function () {
               const r = d3.select(this).attr("r");
               return r === "34" || r === "26";
             })
+            .interrupt()
+            .transition()
+            .duration(t)
             .attr("stroke", NODE_STROKE_COLORS[nodeType])
             .attr("stroke-opacity", 0.4);
         }
       }
     });
+
+    // Start electric current animation on selected link paths
+    this.startElectricAnimation();
   }
 
   private addNeighborHover(
@@ -1774,6 +2018,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const linkedEdgeIds = new Set(
           simLinks.filter((l) => l.sourceId === d.id || l.targetId === d.id),
         );
+
+        // Interrupt any ongoing selection transitions before applying hover
+        neighborNodes.interrupt();
+        edgePaths.interrupt();
+        edgeLabels.interrupt();
+        if (centerNodeEl) centerNodeEl.interrupt();
 
         neighborNodes.attr("opacity", (n: SimNode) =>
           n.id === d.id || linkedEdgeIds.size === 0 ? 1 : 0.25,
@@ -1796,6 +2046,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
         if (this.selectedNodeId) {
           this.applyNodeSelection();
         } else {
+          // Interrupt any transitions before resetting
+          neighborNodes.interrupt();
+          edgePaths.interrupt();
+          edgeLabels.interrupt();
+          if (centerNodeEl) centerNodeEl.interrupt();
+
           neighborNodes.attr("opacity", 1);
           if (centerNodeEl) centerNodeEl.attr("opacity", 1);
           edgePaths.attr("opacity", 1);
@@ -1818,6 +2074,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
     centerNodeEl
       .on("mouseenter", () => {
         const centerId = this.graphData!.center.id;
+
+        // Interrupt any ongoing selection transitions before applying hover
+        neighborNodes.interrupt();
+        edgePaths.interrupt();
+        edgeLabels.interrupt();
+        centerNodeEl.interrupt();
+
         neighborNodes.attr("opacity", 0.25);
         centerNodeEl.attr("opacity", 1);
         edgePaths.attr("opacity", (l: SimLink) =>
@@ -1831,6 +2094,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
         if (this.selectedNodeId) {
           this.applyNodeSelection();
         } else {
+          // Interrupt any transitions before resetting
+          neighborNodes.interrupt();
+          edgePaths.interrupt();
+          edgeLabels.interrupt();
+          centerNodeEl.interrupt();
+
           neighborNodes.attr("opacity", 1);
           centerNodeEl.attr("opacity", 1);
           edgePaths.attr("opacity", 1);
@@ -1871,6 +2140,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .on("mouseenter", (_event: MouseEvent, d: any) => {
         const nodeId = d.data.id;
 
+        // Interrupt any ongoing selection transitions before applying hover
+        nodeGroups.interrupt();
+        linkPathSelection.interrupt();
+        badgeGroup.selectAll("g").interrupt();
+
         if (nodeId === centerId) {
           // Center node: fade all neighbors, highlight all edges
           nodeGroups.attr("opacity", (n: any) =>
@@ -1906,6 +2180,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
         if (this.selectedNodeId) {
           this.applyNodeSelection();
         } else {
+          // Interrupt any transitions before resetting
+          nodeGroups.interrupt();
+          linkPathSelection.interrupt();
+          badgeGroup.selectAll("g").interrupt();
+
           nodeGroups.attr("opacity", 1);
           linkPathSelection.attr("opacity", 1);
           badgeGroup.selectAll("g").attr("opacity", 1);
