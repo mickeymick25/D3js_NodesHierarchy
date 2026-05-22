@@ -9,8 +9,15 @@
             <h1 class="text-lg sm:text-xl font-bold text-gray-900 shrink-0">
                 COP — Relation Graph
             </h1>
-            <app-site-selector></app-site-selector>
-            <app-layout-selector></app-layout-selector>
+            <app-site-selector
+                [sites]="sites"
+                [selectedSiteId]="selectedSiteId"
+                (siteSelected)="onSiteSelect($event)"
+            ></app-site-selector>
+            <app-layout-selector
+                [selectedMode]="selectedLayoutMode"
+                (modeChange)="onModeChange($event)"
+            ></app-layout-selector>
         </div>
     </header>
 
@@ -18,13 +25,16 @@
     <main class="flex-1 relative overflow-hidden">
         <app-graph
             [graphData]="graphData"
-            [layoutMode]="layoutMode"
+            [layoutMode]="selectedLayoutMode"
             class="absolute inset-0"
         ></app-graph>
 
         <!-- Legend overlay -->
         <div class="absolute bottom-4 left-4 z-10">
-            <app-legend></app-legend>
+            <app-legend
+                [filters]="filters"
+                (filterToggle)="onFilterToggle($event)"
+            ></app-legend>
         </div>
     </main>
 </div>

@@ -1,6 +1,15 @@
-import { Component, OnInit } from "@angular/core";
+import { Component, Input, Output, EventEmitter } from "@angular/core";
 import { CommonModule } from "@angular/common";
-import { GraphService, EdgeFilters } from "../../services/graph.service";
+import { EdgeType } from "../../models/graph.model";
+import { EdgeFilters } from "../../services/graph.service";
+import {
+  COLOR_PRIMARY,
+  COLOR_ON_PRIMARY_CONTAINER,
+  COLOR_ELECTRIC,
+  COLOR_ELECTRIC_CONTAINER,
+  COLOR_PRIMARY_CONTAINER,
+  COLOR_TERTIARY,
+} from "../../models/colors";
 
 @Component({
   selector: "app-legend",
@@ -21,21 +30,24 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
         <div class="flex items-center gap-2 mb-1.5">
           <span
             class="inline-block w-4 h-4 rounded-full"
-            style="background-color: #F7FBFF; border: 1px solid #4B9BF5;"
+            [style.backgroundColor]="COLOR_ELECTRIC_CONTAINER"
+            [style.border]="'1px solid ' + COLOR_ELECTRIC"
           ></span>
           <span class="text-gray-700">Site R3 (centre)</span>
         </div>
         <div class="flex items-center gap-2 mb-1.5">
           <span
             class="inline-block w-4 h-4 rounded-full"
-            style="background-color: #978B7F;"
+            [style.backgroundColor]="COLOR_PRIMARY_CONTAINER"
+            [style.border]="'1px solid ' + COLOR_PRIMARY"
           ></span>
           <span class="text-gray-700">Site R1</span>
         </div>
         <div class="flex items-center gap-2">
           <span
             class="inline-block w-4 h-4 rounded-full"
-            style="background-color: #1F1205;"
+            [style.backgroundColor]="COLOR_PRIMARY_CONTAINER"
+            [style.border]="'1px solid ' + COLOR_ON_PRIMARY_CONTAINER"
           ></span>
           <span class="text-gray-700">Site R2</span>
         </div>
@@ -56,7 +68,7 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
         >
           <span
             class="inline-block w-5 h-0.5 rounded-full group-hover:w-6 transition-all"
-            style="background-color: #2E2ECA;"
+            [style.backgroundColor]="COLOR_TERTIARY"
           ></span>
           <span
             class="text-gray-700 group-hover:text-gray-900 transition-colors"
@@ -65,7 +77,7 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
           <span
             class="ml-auto text-xs"
             [ngClass]="filters.animation ? 'font-bold' : ''"
-            [style.color]="filters.animation ? '#2E2ECA' : '#9CA3AF'"
+            [style.color]="filters.animation ? COLOR_TERTIARY : '#9CA3AF'"
           >
             {{ filters.animation ? "✓" : "✗" }}
           </span>
@@ -79,7 +91,7 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
         >
           <span
             class="inline-block w-5 h-0.5 rounded-full group-hover:w-6 transition-all"
-            style="background-color: #978B7F;"
+            [style.backgroundColor]="COLOR_PRIMARY"
           ></span>
           <span
             class="text-gray-700 group-hover:text-gray-900 transition-colors"
@@ -88,7 +100,7 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
           <span
             class="ml-auto text-xs"
             [ngClass]="filters.logistics ? 'font-bold' : ''"
-            [style.color]="filters.logistics ? '#978B7F' : '#9CA3AF'"
+            [style.color]="filters.logistics ? COLOR_PRIMARY : '#9CA3AF'"
           >
             {{ filters.logistics ? "✓" : "✗" }}
           </span>
@@ -118,18 +130,19 @@ import { GraphService, EdgeFilters } from "../../services/graph.service";
     `,
   ],
 })
-export class LegendComponent implements OnInit {
-  filters: EdgeFilters = { animation: true, logistics: true };
+export class LegendComponent {
+  @Input() filters: EdgeFilters = { animation: true, logistics: true };
+  @Output() filterToggle = new EventEmitter<EdgeType>();
 
-  constructor(private graphService: GraphService) {}
+  // Expose color constants to template
+  readonly COLOR_ELECTRIC_CONTAINER = COLOR_ELECTRIC_CONTAINER;
+  readonly COLOR_ELECTRIC = COLOR_ELECTRIC;
+  readonly COLOR_PRIMARY_CONTAINER = COLOR_PRIMARY_CONTAINER;
+  readonly COLOR_PRIMARY = COLOR_PRIMARY;
+  readonly COLOR_ON_PRIMARY_CONTAINER = COLOR_ON_PRIMARY_CONTAINER;
+  readonly COLOR_TERTIARY = COLOR_TERTIARY;
 
-  ngOnInit(): void {
-    this.graphService.getFilters().subscribe((f) => {
-      this.filters = f;
-    });
-  }
-
-  toggle(type: "ANIMATION" | "LOGISTICS"): void {
-    this.graphService.toggleFilter(type);
+  toggle(type: EdgeType): void {
+    this.filterToggle.emit(type);
   }
 }

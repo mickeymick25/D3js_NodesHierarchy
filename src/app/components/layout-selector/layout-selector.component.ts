@@ -1,7 +1,6 @@
-import { Component, OnInit } from "@angular/core";
+import { Component, Input, Output, EventEmitter } from "@angular/core";
 import { CommonModule } from "@angular/common";
 import { FormsModule } from "@angular/forms";
-import { GraphService } from "../../services/graph.service";
 import { LayoutMode, LAYOUT_MODES } from "../../models/graph.model";
 
 @Component({
@@ -16,7 +15,7 @@ import { LayoutMode, LAYOUT_MODES } from "../../models/graph.model";
       <select
         id="layout-select"
         [ngModel]="selectedMode"
-        (ngModelChange)="onModeChange($event)"
+        (ngModelChange)="modeChange.emit($event)"
         class="block w-full sm:w-48 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm py-2 px-3 border bg-white"
       >
         <option
@@ -30,19 +29,8 @@ import { LayoutMode, LAYOUT_MODES } from "../../models/graph.model";
     </div>
   `,
 })
-export class LayoutSelectorComponent implements OnInit {
+export class LayoutSelectorComponent {
   modes = LAYOUT_MODES;
-  selectedMode: LayoutMode = "force";
-
-  constructor(private graphService: GraphService) {}
-
-  ngOnInit(): void {
-    this.graphService.getLayoutMode().subscribe((mode) => {
-      this.selectedMode = mode;
-    });
-  }
-
-  onModeChange(mode: LayoutMode): void {
-    this.graphService.setLayoutMode(mode);
-  }
+  @Input() selectedMode: LayoutMode = "force";
+  @Output() modeChange = new EventEmitter<LayoutMode>();
 }

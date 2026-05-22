@@ -1,7 +1,7 @@
 import { Component, OnInit } from "@angular/core";
 import { CommonModule } from "@angular/common";
-import { GraphData, LayoutMode } from "./models/graph.model";
-import { GraphService } from "./services/graph.service";
+import { GraphData, LayoutMode, Node, EdgeType } from "./models/graph.model";
+import { GraphService, EdgeFilters } from "./services/graph.service";
 import { GraphComponent } from "./components/graph/graph.component";
 import { LegendComponent } from "./components/legend/legend.component";
 import { SiteSelectorComponent } from "./components/site-selector/site-selector.component";
@@ -22,16 +22,38 @@ import { LayoutSelectorComponent } from "./components/layout-selector/layout-sel
 })
 export class AppComponent implements OnInit {
   graphData: GraphData | null = null;
-  layoutMode: LayoutMode = "force";
+  sites: Node[] = [];
+  selectedSiteId = "";
+  selectedLayoutMode: LayoutMode = "force";
+  filters: EdgeFilters = { animation: true, logistics: true };
 
   constructor(private graphService: GraphService) {}
 
   ngOnInit(): void {
+    this.sites = this.graphService.getAllSites();
     this.graphService.getGraphData().subscribe((data) => {
       this.graphData = data;
     });
-    this.graphService.getLayoutMode().subscribe((mode) => {
-      this.layoutMode = mode;
+    this.graphService.getSelectedSiteId().subscribe((id) => {
+      this.selectedSiteId = id;
     });
+    this.graphService.getLayoutMode().subscribe((mode) => {
+      this.selectedLayoutMode = mode;
+    });
+    this.graphService.getFilters().subscribe((f) => {
+      this.filters = f;
+    });
+  }
+
+  onFilterToggle(type: EdgeType): void {
+    this.graphService.toggleFilter(type);
+  }
+
+  onSiteSelect(siteId: string): void {
+    this.graphService.selectSite(siteId);
+  }
+
+  onModeChange(mode: LayoutMode): void {
+    this.graphService.setLayoutMode(mode);
   }
 }

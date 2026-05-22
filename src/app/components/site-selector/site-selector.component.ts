@@ -1,7 +1,6 @@
-import { Component, OnInit } from "@angular/core";
+import { Component, Input, Output, EventEmitter } from "@angular/core";
 import { CommonModule } from "@angular/common";
 import { FormsModule } from "@angular/forms";
-import { GraphService } from "../../services/graph.service";
 import { Node } from "../../models/graph.model";
 
 @Component({
@@ -16,7 +15,7 @@ import { Node } from "../../models/graph.model";
       <select
         id="site-select"
         [ngModel]="selectedSiteId"
-        (ngModelChange)="onSiteChange($event)"
+        (ngModelChange)="siteSelected.emit($event)"
         class="block w-full sm:w-64 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm py-2 px-3 border bg-white"
       >
         <option *ngFor="let site of sites" [ngValue]="site.id">
@@ -26,20 +25,8 @@ import { Node } from "../../models/graph.model";
     </div>
   `,
 })
-export class SiteSelectorComponent implements OnInit {
-  sites: Node[] = [];
-  selectedSiteId = "";
-
-  constructor(private graphService: GraphService) {}
-
-  ngOnInit(): void {
-    this.sites = this.graphService.getAllSites();
-    this.graphService.getSelectedSiteId().subscribe((id) => {
-      this.selectedSiteId = id;
-    });
-  }
-
-  onSiteChange(siteId: string): void {
-    this.graphService.selectSite(siteId);
-  }
+export class SiteSelectorComponent {
+  @Input() sites: Node[] = [];
+  @Input() selectedSiteId = "";
+  @Output() siteSelected = new EventEmitter<string>();
 }

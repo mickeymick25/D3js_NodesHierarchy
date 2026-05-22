@@ -10,6 +10,29 @@ import {
 import { CommonModule } from "@angular/common";
 import * as d3 from "d3";
 import { GraphData, NodeType, LayoutMode } from "../../models/graph.model";
+import {
+  COLOR_PRIMARY,
+  COLOR_ON_PRIMARY,
+  COLOR_PRIMARY_CONTAINER,
+  COLOR_ON_PRIMARY_CONTAINER,
+  COLOR_SECONDARY_CONTAINER,
+  COLOR_ON_SECONDARY_CONTAINER,
+  COLOR_TERTIARY,
+  COLOR_ON_TERTIARY,
+  COLOR_TERTIARY_CONTAINER,
+  COLOR_ON_TERTIARY_CONTAINER,
+  COLOR_ELECTRIC,
+  COLOR_ON_ELECTRIC,
+  COLOR_ELECTRIC_CONTAINER,
+  COLOR_ON_ELECTRIC_CONTAINER,
+  NODE_COLORS,
+  NODE_STROKE_COLORS,
+  NODE_TEXT_COLORS,
+  NODE_LABEL_COLORS,
+  NODE_RADIUS,
+  NODE_LABELS,
+  LINK_DISTANCE,
+} from "../../models/colors";
 
 interface SimNode extends d3.SimulationNodeDatum {
   id: string;
@@ -60,68 +83,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
   // Saved positions for smooth layout transitions
   private savedPositions = new Map<string, { x: number; y: number }>();
-  private readonly TRANSITION_MS = 600;
 
-  // Design tokens
-  private readonly COLOR_PRIMARY = "#978B7F";
-  private readonly COLOR_ON_PRIMARY = "#DEDAD5";
-  private readonly COLOR_PRIMARY_CONTAINER = "#DEDAD5";
-  private readonly COLOR_ON_PRIMARY_CONTAINER = "#1F1205";
-  private readonly COLOR_SECONDARY = "#000000";
-  private readonly COLOR_ON_SECONDARY = "#E6E6E6";
-  private readonly COLOR_SECONDARY_CONTAINER = "#E6E6E6";
-  private readonly COLOR_ON_SECONDARY_CONTAINER = "#1A1A1A";
-  private readonly COLOR_TERTIARY = "#2E2ECA";
-  private readonly COLOR_ON_TERTIARY = "#FFFFFF";
-  private readonly COLOR_TERTIARY_CONTAINER = "#EBEBF7";
-  private readonly COLOR_ON_TERTIARY_CONTAINER = "#101078";
+  // Collapsed branches in tree view
+  private collapsedBranches = new Set<string>();
 
-  // Electric tokens (for SITE R3)
-  private readonly COLOR_ELECTRIC = "#4B9BF5";
-  private readonly COLOR_ON_ELECTRIC = "#041A33";
-  private readonly COLOR_ELECTRIC_CONTAINER = "#F7FBFF";
-  private readonly COLOR_ON_ELECTRIC_CONTAINER = "#1C5494";
-
-  private readonly NODE_COLORS: Record<NodeType, string> = {
-    SITE: this.COLOR_ELECTRIC_CONTAINER,
-    R1: this.COLOR_PRIMARY,
-    R2: this.COLOR_ON_PRIMARY_CONTAINER,
-  };
-
-  private readonly NODE_STROKE_COLORS: Record<NodeType, string> = {
-    SITE: this.COLOR_ELECTRIC,
-    R1: this.COLOR_ON_PRIMARY,
-    R2: this.COLOR_ON_PRIMARY,
-  };
-
-  private readonly NODE_TEXT_COLORS: Record<NodeType, string> = {
-    SITE: this.COLOR_ON_ELECTRIC_CONTAINER,
-    R1: this.COLOR_ON_PRIMARY,
-    R2: this.COLOR_ON_PRIMARY,
-  };
-
-  private readonly NODE_LABEL_COLORS: Record<NodeType, string> = {
-    SITE: this.COLOR_ON_ELECTRIC_CONTAINER,
-    R1: this.COLOR_ON_SECONDARY_CONTAINER,
-    R2: this.COLOR_ON_SECONDARY_CONTAINER,
-  };
-
-  private readonly NODE_RADIUS: Record<NodeType, number> = {
-    SITE: 30,
-    R1: 22,
-    R2: 22,
-  };
-
-  private readonly NODE_LABELS: Record<NodeType, string> = {
-    SITE: "R3",
-    R1: "R1",
-    R2: "R2",
-  };
-
-  private readonly LINK_DISTANCE: Record<string, number> = {
-    ANIMATION: 220,
-    LOGISTICS: 280,
-  };
+  // Selected node (click to select, click again to deselect)
+  private selectedNodeId: string | null = null;
 
   ngOnChanges(changes: SimpleChanges): void {
     if (!this.graphData) return;
@@ -130,6 +97,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
       // Data changed → full rebuild
       this.destroySvg();
       this.savedPositions.clear();
+      this.collapsedBranches.clear();
+      this.selectedNodeId = null;
       this.renderGraph();
     } else if (changes["layoutMode"]) {
       // Layout changed → smooth transition
@@ -240,18 +209,6 @@ export class GraphComponent implements OnChanges, OnDestroy {
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     return counts;
-  }
-
-  private getLinkOffset(
-    link: SimLink,
-    parallelCounts: Map<string, number>,
-    linkIndexInGroup: number,
-  ): number {
-    const key = [link.sourceId, link.targetId].sort().join("|");
-    const total = parallelCounts.get(key) || 1;
-    if (total <= 1) return 0;
-    const spacing = 65;
-    return (linkIndexInGroup - (total - 1) / 2) * spacing;
   }
 
   /**
@@ -384,15 +341,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
       case "tree":
         this.renderTreeLayout();
         break;
-      case "radial":
-        this.renderRadialLayout();
-        break;
-      case "pack":
-        this.renderPackLayout();
-        break;
       default:
         this.renderForceLayout();
         break;
+    }
+
+    // Re-apply node selection after render
+    if (this.selectedNodeId) {
+      this.applyNodeSelection();
     }
   }
 
@@ -572,10 +528,18 @@ export class GraphComponent implements OnChanges, OnDestroy {
       centerNodeEl,
     );
 
+    // ── Click to select R1/R2 nodes ──
+    neighborNodes.on("click", (_event: MouseEvent, d: SimNode) => {
+      if (d.type === "R1" || d.type === "R2") {
+        this.selectedNodeId = this.selectedNodeId === d.id ? null : d.id;
+        this.applyNodeSelection();
+      }
+    });
+
     // ── Path computation ──
     const targetRadius = (id: string): number => {
       const n = simNodes.find((n) => n.id === id);
-      return n ? this.NODE_RADIUS[n.type] : 20;
+      return n ? NODE_RADIUS[n.type] : 20;
     };
 
     const computePath = (d: SimLink): string =>
@@ -589,7 +553,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         d3
           .forceLink<SimNode, SimLink>(simLinks)
           .id((d) => d.id)
-          .distance((d) => this.LINK_DISTANCE[d.edgeType] || 150),
+          .distance((d) => LINK_DISTANCE[d.edgeType] || 150),
       )
       .force("charge", d3.forceManyBody().strength(-400))
       .force("center", d3.forceCenter(width / 2, height / 2))
@@ -655,6 +619,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const hierarchyData = this.buildHierarchy();
     const root = d3.hierarchy(hierarchyData);
 
+    // Apply collapsed state to branch nodes
+    root.each((node: any) => {
+      if (this.collapsedBranches.has(node.data.id) && node.children) {
+        (node as any)._children = node.children;
+        node.children = null;
+      }
+    });
+
     // Compute tree layout - horizontal orientation (left to right)
     const treeLayout = d3
       .tree<HierarchyDatum>()
@@ -667,10 +639,24 @@ export class GraphComponent implements OnChanges, OnDestroy {
     // x → vertical position, y → horizontal depth
     const allNodes = root.descendants();
 
+    // Visible node IDs (for filtering collapsed nodes)
+    const visibleIds = new Set(allNodes.map((d: any) => d.data.id));
+
     // Compute target positions for each node
     const targetPositions = new Map<string, { x: number; y: number }>();
     allNodes.forEach((d: any) => {
       targetPositions.set(d.data.id, { x: d.y + 150, y: d.x + 40 });
+    });
+
+    // Build parent position map for newly expanded nodes
+    const parentPositions = new Map<string, { x: number; y: number }>();
+    allNodes.forEach((d: any) => {
+      if (d.parent) {
+        const parentPos = targetPositions.get(d.parent.data.id);
+        if (parentPos) {
+          parentPositions.set(d.data.id, parentPos);
+        }
+      }
     });
 
     // Get center position for default transitions
@@ -689,8 +675,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("fill", "none")
       .attr("stroke", (d: any) => {
         const childData = d.target.data as HierarchyDatum;
-        if (childData.edgeType === "ANIMATION") return this.COLOR_TERTIARY;
-        return this.COLOR_PRIMARY;
+        if (childData.edgeType === "ANIMATION") return COLOR_TERTIARY;
+        return COLOR_PRIMARY;
       })
       .attr("stroke-width", 1.5)
       .attr("opacity", 1)
@@ -727,9 +713,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const midY = (sourcePos!.y + targetPos!.y) / 2;
 
       const color =
-        childData.edgeType === "ANIMATION"
-          ? this.COLOR_TERTIARY
-          : this.COLOR_PRIMARY;
+        childData.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
       const badgeText =
         childData.edgeType === "ANIMATION"
           ? "A"
@@ -755,7 +739,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("dy", "0.35em")
         .attr("font-size", childData.dmsId ? "7px" : "9px")
         .attr("font-weight", "700")
-        .attr("fill", this.COLOR_ON_PRIMARY)
+        .attr("fill", COLOR_ON_PRIMARY)
         .text(badgeText);
 
       const bbox = (textEl.node() as SVGTextElement).getBBox();
@@ -809,7 +793,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
             : isR1Group
               ? "R1"
               : "R2";
-        const color = isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY;
+        const color = isAnimation ? COLOR_TERTIARY : COLOR_PRIMARY;
         const width = isLogisticsMain ? 100 : 60;
         const height = isLogisticsMain ? 28 : 22;
         const fontSize = isLogisticsMain ? "11px" : "10px";
@@ -843,62 +827,83 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("font-weight", fontWeight)
           .attr("fill", color)
           .text(label);
+
+        // Collapse/expand indicator
+        const isCollapsed = self.collapsedBranches.has(data.id);
+        const indicatorSymbol = isCollapsed ? "\u25B6" : "\u25BC";
+        g.append("circle")
+          .attr("cx", width / 2 + 10)
+          .attr("cy", 0)
+          .attr("r", 8)
+          .attr("fill", "white")
+          .attr("stroke", color)
+          .attr("stroke-width", 1.5);
+
+        g.append("text")
+          .attr("x", width / 2 + 10)
+          .attr("dy", "0.35em")
+          .attr("text-anchor", "middle")
+          .attr("font-size", "9px")
+          .attr("font-weight", "700")
+          .attr("fill", color)
+          .text(indicatorSymbol);
+
+        g.style("cursor", "pointer");
+
         return;
       }
 
       // Root node (SITE)
       if (d.depth === 0) {
         g.append("circle")
-          .attr("r", self.NODE_RADIUS.SITE)
-          .attr("fill", self.NODE_COLORS.SITE)
-          .attr("stroke", self.COLOR_ELECTRIC)
+          .attr("r", NODE_RADIUS.SITE)
+          .attr("fill", NODE_COLORS.SITE)
+          .attr("stroke", COLOR_ELECTRIC)
           .attr("stroke-width", 1.5);
 
         g.append("text")
           .text("R3")
           .attr("dy", "0.35em")
-          .attr("text-anchor", "end")
-          .attr("x", -self.NODE_RADIUS.SITE - 6)
+          .attr("text-anchor", "middle")
           .attr("font-size", "9px")
           .attr("font-weight", "700")
-          .attr("fill", self.COLOR_ON_ELECTRIC_CONTAINER);
+          .attr("fill", COLOR_ON_ELECTRIC_CONTAINER);
 
         g.append("text")
           .text(data.label)
-          .attr("dy", "0.35em")
-          .attr("text-anchor", "end")
-          .attr("x", -self.NODE_RADIUS.SITE - 6)
-          .attr("y", 13)
+          .attr("dy", NODE_RADIUS.SITE + 16)
+          .attr("text-anchor", "middle")
           .attr("font-size", "13px")
           .attr("font-weight", "700")
-          .attr("fill", self.COLOR_ON_ELECTRIC_CONTAINER);
+          .attr("fill", COLOR_ON_ELECTRIC_CONTAINER);
         return;
       }
 
       // Leaf nodes (R1/R2)
-      const radius = self.NODE_RADIUS[data.type] || 22;
-      const fillColor = self.NODE_COLORS[data.type] || self.COLOR_PRIMARY;
+      const radius = NODE_RADIUS[data.type] || 22;
+      const fillColor = NODE_COLORS[data.type] || COLOR_PRIMARY;
+      const strokeColor = NODE_STROKE_COLORS[data.type] || COLOR_ON_PRIMARY;
 
       g.append("circle")
         .attr("r", radius + 4)
         .attr("fill", "none")
-        .attr("stroke", self.COLOR_ON_PRIMARY)
+        .attr("stroke", strokeColor)
         .attr("stroke-width", 1.5)
         .attr("stroke-opacity", 0.4);
 
       g.append("circle")
         .attr("r", radius)
         .attr("fill", fillColor)
-        .attr("stroke", self.COLOR_ON_PRIMARY)
+        .attr("stroke", strokeColor)
         .attr("stroke-width", 2.5);
 
       g.append("text")
-        .text(self.NODE_LABELS[data.type] || "")
+        .text(NODE_LABELS[data.type] || "")
         .attr("dy", "0.35em")
         .attr("text-anchor", "middle")
         .attr("font-size", "10px")
         .attr("font-weight", "700")
-        .attr("fill", self.COLOR_ON_PRIMARY);
+        .attr("fill", NODE_TEXT_COLORS[data.type]);
 
       g.append("text")
         .text(data.label)
@@ -907,27 +912,28 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("x", radius + 8)
         .attr("font-size", "12px")
         .attr("font-weight", "500")
-        .attr("fill", self.COLOR_ON_SECONDARY_CONTAINER);
+        .attr("fill", COLOR_ON_SECONDARY_CONTAINER);
 
       // SIGMPR mini-tag for R1 leaf nodes
       if (data.type === "R1" && data.sigmpr) {
-        const sigmprText = `SIG:${data.sigmpr}`;
+        const sigmprText = `SIGMPR:${data.sigmpr}`;
         const sigmprG = g.append("g");
+        const sigmprColor = NODE_STROKE_COLORS[data.type] || COLOR_PRIMARY;
         sigmprG
           .append("rect")
           .attr("rx", 6)
           .attr("ry", 6)
-          .attr("fill", self.COLOR_PRIMARY)
+          .attr("fill", sigmprColor)
           .attr("fill-opacity", 0.9);
         const sigmprTextEl = sigmprG
           .append("text")
           .text(sigmprText)
           .attr("x", radius + 8)
-          .attr("dy", `${radius + 28}px`)
+          .attr("y", 18)
           .attr("text-anchor", "start")
           .attr("font-size", "7px")
           .attr("font-weight", "700")
-          .attr("fill", self.COLOR_ON_PRIMARY)
+          .attr("fill", COLOR_ON_PRIMARY)
           .attr("pointer-events", "none");
         const sigmprBbox = (sigmprTextEl.node() as SVGTextElement).getBBox();
         sigmprG
@@ -951,10 +957,35 @@ export class GraphComponent implements OnChanges, OnDestroy {
       targetPositions,
     );
 
+    // ── Click handlers: R1/R2 selection + branch collapse/expand ──
+    nodeGroups.on("click", (_event: MouseEvent, d: any) => {
+      const data = d.data as HierarchyDatum;
+      if (
+        data.id === "__animation__" ||
+        data.id === "__logistics__" ||
+        data.id === "__logistics_r1__" ||
+        data.id === "__logistics_r2__"
+      ) {
+        // Branch node → toggle collapse/expand
+        if (this.collapsedBranches.has(data.id)) {
+          this.collapsedBranches.delete(data.id);
+        } else {
+          this.collapsedBranches.add(data.id);
+        }
+        this.saveNodePositions();
+        this.stopSimulation();
+        this.renderGraph();
+      } else if (data.type === "R1" || data.type === "R2") {
+        // R1/R2 leaf node → toggle selection
+        this.selectedNodeId = this.selectedNodeId === data.id ? null : data.id;
+        this.applyNodeSelection();
+      }
+    });
+
     // ── Simulation ──
     const leafNodeIds = new Set(
       this.graphData!.nodes.filter(
-        (n) => n.id !== this.graphData!.center.id,
+        (n) => n.id !== this.graphData!.center.id && visibleIds.has(n.id),
       ).map((n) => n.id),
     );
 
@@ -976,9 +1007,10 @@ export class GraphComponent implements OnChanges, OnDestroy {
     simNodes.push(centerSimNode);
     simNodeMap.set(centerSimNode.id, centerSimNode);
 
-    // Leaf nodes (draggable)
+    // Leaf nodes (draggable) — only visible ones
     for (const node of this.graphData!.nodes) {
       if (node.id === this.graphData!.center.id) continue;
+      if (!visibleIds.has(node.id)) continue;
       const simNode: SimNode = {
         id: node.id,
         label: node.label,
@@ -987,8 +1019,21 @@ export class GraphComponent implements OnChanges, OnDestroy {
       };
       const target = targetPositions.get(node.id);
       const saved = this.savedPositions.get(node.id);
-      simNode.x = saved ? saved.x : target ? target.x : width / 2;
-      simNode.y = saved ? saved.y : target ? target.y : height / 2;
+      const parentPos = parentPositions.get(node.id);
+      simNode.x = saved
+        ? saved.x
+        : parentPos
+          ? parentPos.x
+          : target
+            ? target.x
+            : width / 2;
+      simNode.y = saved
+        ? saved.y
+        : parentPos
+          ? parentPos.y
+          : target
+            ? target.y
+            : height / 2;
       simNodes.push(simNode);
       simNodeMap.set(simNode.id, simNode);
     }
@@ -1111,763 +1156,6 @@ export class GraphComponent implements OnChanges, OnDestroy {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // RADIAL LAYOUT (D3 hierarchy + polar projection)
-  // ═══════════════════════════════════════════════════════════════════
-
-  private renderRadialLayout(): void {
-    if (!this.graphData) return;
-
-    const containerEl = this.container.nativeElement;
-    const width = containerEl.clientWidth;
-    const height = containerEl.clientHeight;
-
-    // Use persistent SVG
-    const svg = this.svg!;
-    const g = this.g!;
-
-    // Build hierarchy for radial tree
-    const hierarchyData = this.buildHierarchy();
-    const root = d3.hierarchy(hierarchyData);
-
-    const radius = Math.min(width, height) / 2 - 120;
-
-    const treeLayout = d3
-      .tree<HierarchyDatum>()
-      .size([2 * Math.PI, radius])
-      .separation((a, b) => (a.parent === b.parent ? 1 : 2) / a.depth);
-
-    treeLayout(root);
-
-    // Convert polar to cartesian, centered in SVG
-    const cx = width / 2;
-    const cy = height / 2;
-
-    // Compute target positions for each node
-    const targetPositions = new Map<string, { x: number; y: number }>();
-    root.descendants().forEach((d: any) => {
-      targetPositions.set(d.data.id, {
-        x: cx + d.y * Math.cos(d.x - Math.PI / 2),
-        y: cy + d.y * Math.sin(d.x - Math.PI / 2),
-      });
-    });
-
-    const defaultX = cx;
-    const defaultY = cy;
-
-    // Draw radial links
-    const radialLinks = g.append("g").attr("class", "radial-links");
-
-    radialLinks
-      .selectAll("path")
-      .data(root.links())
-      .enter()
-      .append("path")
-      .attr("fill", "none")
-      .attr("stroke", (d: any) => {
-        const childData = d.target.data as HierarchyDatum;
-        if (childData.edgeType === "ANIMATION") return this.COLOR_TERTIARY;
-        return this.COLOR_PRIMARY;
-      })
-      .attr("stroke-width", 1.5)
-      .attr("opacity", 1)
-      .attr("d", (d: any) => {
-        const sx = cx + d.source.y * Math.cos(d.source.x - Math.PI / 2);
-        const sy = cy + d.source.y * Math.sin(d.source.x - Math.PI / 2);
-        const tx = cx + d.target.y * Math.cos(d.target.x - Math.PI / 2);
-        const ty = cy + d.target.y * Math.sin(d.target.x - Math.PI / 2);
-        const sourceR = d.source.y;
-        const targetR = d.target.y;
-        const midR = (sourceR + targetR) / 2;
-        const midAngle = (d.source.x + d.target.x) / 2 - Math.PI / 2;
-        const cmx = cx + midR * Math.cos(midAngle);
-        const cmy = cy + midR * Math.sin(midAngle);
-        return `M${sx},${sy}Q${cmx},${cmy} ${tx},${ty}`;
-      })
-      .attr("data-source-id", (d: any) => d.source.data.id)
-      .attr("data-target-id", (d: any) => d.target.data.id);
-
-    // Draw link badges
-    const linkBadges = g.append("g").attr("class", "link-badges");
-
-    root.links().forEach((link: any) => {
-      const childData = link.target.data as HierarchyDatum;
-      if (
-        childData.id === "__animation__" ||
-        childData.id === "__logistics__" ||
-        childData.id === "__logistics_r1__" ||
-        childData.id === "__logistics_r2__"
-      )
-        return;
-
-      const midAngle = (link.source.x + link.target.x) / 2;
-      const midRadius = (link.source.y + link.target.y) / 2;
-      const mx = cx + midRadius * Math.cos(midAngle - Math.PI / 2);
-      const my = cy + midRadius * Math.sin(midAngle - Math.PI / 2);
-
-      const color =
-        childData.edgeType === "ANIMATION"
-          ? this.COLOR_TERTIARY
-          : this.COLOR_PRIMARY;
-      const badgeText =
-        childData.edgeType === "ANIMATION"
-          ? "A"
-          : childData.dmsId
-            ? `DMS:${childData.dmsId}`
-            : "L";
-
-      const badgeG = linkBadges
-        .append("g")
-        .attr("data-target-id", childData.id)
-        .attr("transform", `translate(${mx},${my})`);
-
-      badgeG
-        .append("rect")
-        .attr("rx", 8)
-        .attr("ry", 8)
-        .attr("fill", color)
-        .attr("fill-opacity", 0.9);
-
-      const textEl = badgeG
-        .append("text")
-        .attr("text-anchor", "middle")
-        .attr("dy", "0.35em")
-        .attr("font-size", childData.dmsId ? "7px" : "9px")
-        .attr("font-weight", "700")
-        .attr("fill", this.COLOR_ON_PRIMARY)
-        .text(badgeText);
-
-      const bbox = (textEl.node() as SVGTextElement).getBBox();
-      badgeG
-        .select("rect")
-        .attr("x", bbox.x - 4)
-        .attr("y", bbox.y - 2)
-        .attr("width", bbox.width + 8)
-        .attr("height", bbox.height + 4);
-    });
-
-    // Draw nodes
-    const nodeGroups = g
-      .append("g")
-      .attr("class", "radial-nodes")
-      .selectAll("g")
-      .data(root.descendants())
-      .enter()
-      .append("g")
-      .attr("data-node-id", (d: any) => d.data.id)
-      .attr("transform", (d: any) => {
-        const saved = this.savedPositions.get(d.data.id);
-        if (saved) return `translate(${saved.x},${saved.y})`;
-        const target = targetPositions.get(d.data.id);
-        return target
-          ? `translate(${target.x},${target.y})`
-          : `translate(${defaultX},${defaultY})`;
-      })
-      .attr("cursor", "pointer");
-
-    // Style each node based on its role
-    const self = this;
-    nodeGroups.each(function (d: any) {
-      const data = d.data as HierarchyDatum;
-      const g = d3.select(this);
-
-      // Branch nodes
-      if (
-        data.id === "__animation__" ||
-        data.id === "__logistics__" ||
-        data.id === "__logistics_r1__" ||
-        data.id === "__logistics_r2__"
-      ) {
-        const isAnimation = data.id === "__animation__";
-        const isLogisticsMain = data.id === "__logistics__";
-        const isR1Group = data.id === "__logistics_r1__";
-        const label = isAnimation
-          ? "Animation"
-          : isLogisticsMain
-            ? "Logistique"
-            : isR1Group
-              ? "R1"
-              : "R2";
-        const color = isAnimation ? self.COLOR_TERTIARY : self.COLOR_PRIMARY;
-        const width = isLogisticsMain ? 90 : 50;
-        const height = isLogisticsMain ? 24 : 20;
-        const fontSize = isLogisticsMain ? "10px" : "9px";
-        const fontWeight = isLogisticsMain ? "600" : "700";
-
-        g.append("rect")
-          .attr("rx", 6)
-          .attr("ry", 6)
-          .attr("width", width)
-          .attr("height", height)
-          .attr("x", -width / 2)
-          .attr("y", -height / 2)
-          .attr("fill", "white");
-
-        g.append("rect")
-          .attr("rx", 6)
-          .attr("ry", 6)
-          .attr("width", width)
-          .attr("height", height)
-          .attr("x", -width / 2)
-          .attr("y", -height / 2)
-          .attr("fill", color)
-          .attr("fill-opacity", 0.15)
-          .attr("stroke", color)
-          .attr("stroke-width", 1.5);
-
-        g.append("text")
-          .attr("text-anchor", "middle")
-          .attr("dy", "0.35em")
-          .attr("font-size", fontSize)
-          .attr("font-weight", fontWeight)
-          .attr("fill", color)
-          .text(label);
-        return;
-      }
-
-      // Root node
-      if (d.depth === 0) {
-        g.append("circle")
-          .attr("r", self.NODE_RADIUS.SITE)
-          .attr("fill", self.NODE_COLORS.SITE)
-          .attr("stroke", self.COLOR_ELECTRIC)
-          .attr("stroke-width", 1.5);
-
-        g.append("text")
-          .text("R3")
-          .attr("dy", "0.35em")
-          .attr("text-anchor", "middle")
-          .attr("font-size", "9px")
-          .attr("font-weight", "700")
-          .attr("fill", self.COLOR_ON_ELECTRIC_CONTAINER);
-
-        g.append("text")
-          .text(data.label)
-          .attr("dy", self.NODE_RADIUS.SITE + 16)
-          .attr("text-anchor", "middle")
-          .attr("font-size", "13px")
-          .attr("font-weight", "700")
-          .attr("fill", self.COLOR_ON_ELECTRIC_CONTAINER);
-        return;
-      }
-
-      // Leaf nodes
-      const radius = self.NODE_RADIUS[data.type] || 22;
-      const fillColor = self.NODE_COLORS[data.type] || self.COLOR_PRIMARY;
-
-      g.append("circle")
-        .attr("r", radius + 4)
-        .attr("fill", "none")
-        .attr("stroke", self.COLOR_ON_PRIMARY)
-        .attr("stroke-width", 1.5)
-        .attr("stroke-opacity", 0.4);
-
-      g.append("circle")
-        .attr("r", radius)
-        .attr("fill", fillColor)
-        .attr("stroke", self.COLOR_ON_PRIMARY)
-        .attr("stroke-width", 2.5);
-
-      g.append("text")
-        .text(self.NODE_LABELS[data.type] || "")
-        .attr("dy", "0.35em")
-        .attr("text-anchor", "middle")
-        .attr("font-size", "10px")
-        .attr("font-weight", "700")
-        .attr("fill", self.COLOR_ON_PRIMARY);
-
-      g.append("text")
-        .text(data.label)
-        .attr("dy", radius + 16)
-        .attr("text-anchor", "middle")
-        .attr("font-size", "12px")
-        .attr("font-weight", "500")
-        .attr("fill", self.COLOR_ON_SECONDARY_CONTAINER);
-
-      // SIGMPR mini-tag for R1 leaf nodes
-      if (data.type === "R1" && data.sigmpr) {
-        const sigmprText = `SIG:${data.sigmpr}`;
-        const sigmprG = g.append("g");
-        sigmprG
-          .append("rect")
-          .attr("rx", 6)
-          .attr("ry", 6)
-          .attr("fill", self.COLOR_PRIMARY)
-          .attr("fill-opacity", 0.9);
-        const sigmprTextEl = sigmprG
-          .append("text")
-          .text(sigmprText)
-          .attr("text-anchor", "middle")
-          .attr("x", 0)
-          .attr("y", radius + 32)
-          .attr("font-size", "7px")
-          .attr("font-weight", "700")
-          .attr("fill", self.COLOR_ON_PRIMARY)
-          .attr("pointer-events", "none");
-        const sigmprBbox = (sigmprTextEl.node() as SVGTextElement).getBBox();
-        sigmprG
-          .select("rect")
-          .attr("x", sigmprBbox.x - 3)
-          .attr("y", sigmprBbox.y - 1.5)
-          .attr("width", sigmprBbox.width + 6)
-          .attr("height", sigmprBbox.height + 3);
-      }
-    });
-
-    // ── Hover interactions ──
-    const tooltipGroup = g.append("g").attr("class", "link-labels");
-    this.addHierarchyHoverInteractions(
-      nodeGroups,
-      radialLinks.selectAll("path"),
-      linkBadges,
-      this.graphData.center.id,
-      root,
-      tooltipGroup,
-      targetPositions,
-    );
-
-    // ── Simulation ──
-    const leafNodeIds = new Set(
-      this.graphData!.nodes.filter(
-        (n) => n.id !== this.graphData!.center.id,
-      ).map((n) => n.id),
-    );
-
-    const simNodes: SimNode[] = [];
-    const simNodeMap = new Map<string, SimNode>();
-
-    // Center node (pinned)
-    const centerSimNode: SimNode = {
-      id: this.graphData!.center.id,
-      label: this.graphData!.center.label,
-      type: this.graphData!.center.type,
-    };
-    const centerTarget = targetPositions.get(this.graphData!.center.id);
-    const savedCenterPos = this.savedPositions.get(this.graphData!.center.id);
-    centerSimNode.fx = centerTarget ? centerTarget.x : cx;
-    centerSimNode.fy = centerTarget ? centerTarget.y : cy;
-    centerSimNode.x = savedCenterPos ? savedCenterPos.x : centerSimNode.fx;
-    centerSimNode.y = savedCenterPos ? savedCenterPos.y : centerSimNode.fy;
-    simNodes.push(centerSimNode);
-    simNodeMap.set(centerSimNode.id, centerSimNode);
-
-    // Leaf nodes (draggable)
-    for (const node of this.graphData!.nodes) {
-      if (node.id === this.graphData!.center.id) continue;
-      const simNode: SimNode = {
-        id: node.id,
-        label: node.label,
-        type: node.type,
-        sigmpr: node.sigmpr,
-      };
-      const target = targetPositions.get(node.id);
-      const saved = this.savedPositions.get(node.id);
-      simNode.x = saved ? saved.x : target ? target.x : cx;
-      simNode.y = saved ? saved.y : target ? target.y : cy;
-      simNodes.push(simNode);
-      simNodeMap.set(simNode.id, simNode);
-    }
-
-    // Build parent map for badge updates
-    const parentMap = new Map<string, string>();
-    root.links().forEach((link: any) => {
-      parentMap.set(link.target.data.id, link.source.data.id);
-    });
-
-    // Position lookup: simulation nodes > target positions
-    const getPosition = (id: string): { x: number; y: number } => {
-      const sn = simNodeMap.get(id);
-      if (sn && sn.x !== undefined && sn.y !== undefined) {
-        return { x: sn.x, y: sn.y };
-      }
-      const t = targetPositions.get(id);
-      if (t) return t;
-      return { x: cx, y: cy };
-    };
-
-    // Drag behavior on leaf nodes only
-    const leafNodeGroups = nodeGroups.filter((d: any) =>
-      leafNodeIds.has(d.data.id),
-    );
-
-    const svgEl = this.svg!.node()!;
-
-    leafNodeGroups.call(
-      d3
-        .drag<SVGGElement, any>()
-        .container(svgEl)
-        .on("start", (event: any, d: any) => {
-          const sn = simNodeMap.get(d.data.id);
-          if (!sn) return;
-          if (!event.active) this.simulation?.alphaTarget(0.3).restart();
-          sn.fx = sn.x;
-          sn.fy = sn.y;
-        })
-        .on("drag", (event: any, d: any) => {
-          const sn = simNodeMap.get(d.data.id);
-          if (!sn) return;
-          const [mx, my] = d3.pointer(event, svgEl);
-          sn.fx = mx;
-          sn.fy = my;
-        })
-        .on("end", (event: any, d: any) => {
-          const sn = simNodeMap.get(d.data.id);
-          if (!sn) return;
-          if (!event.active) this.simulation?.alphaTarget(0);
-          sn.fx = null;
-          sn.fy = null;
-        }),
-    );
-
-    // Force simulation
-    this.simulation = d3
-      .forceSimulation<SimNode>(simNodes)
-      .force(
-        "x",
-        d3
-          .forceX<SimNode>((d) => {
-            const t = targetPositions.get(d.id);
-            return t ? t.x : cx;
-          })
-          .strength(0.5),
-      )
-      .force(
-        "y",
-        d3
-          .forceY<SimNode>((d) => {
-            const t = targetPositions.get(d.id);
-            return t ? t.y : cy;
-          })
-          .strength(0.5),
-      )
-      .force("collide", d3.forceCollide().radius(30).strength(0.3))
-      .on("tick", () => {
-        // Update node positions
-        nodeGroups.attr("transform", (d: any) => {
-          const pos = getPosition(d.data.id);
-          return `translate(${pos.x},${pos.y})`;
-        });
-
-        // Update link paths
-        radialLinks.selectAll("path").attr("d", (d: any) => {
-          const sourcePos = getPosition(d.source.data.id);
-          const targetPos = getPosition(d.target.data.id);
-          const sR =
-            sourcePos === targetPositions.get(d.source.data.id)
-              ? d.source.y
-              : Math.sqrt((sourcePos.x - cx) ** 2 + (sourcePos.y - cy) ** 2);
-          const tR =
-            targetPos === targetPositions.get(d.target.data.id)
-              ? d.target.y
-              : Math.sqrt((targetPos.x - cx) ** 2 + (targetPos.y - cy) ** 2);
-          const midR = (sR + tR) / 2;
-          const midAngle = (d.source.x + d.target.x) / 2 - Math.PI / 2;
-          const cmx = cx + midR * Math.cos(midAngle);
-          const cmy = cy + midR * Math.sin(midAngle);
-          return `M${sourcePos.x},${sourcePos.y}Q${cmx},${cmy} ${targetPos.x},${targetPos.y}`;
-        });
-
-        // Update badge positions
-        linkBadges.selectAll("g").attr("transform", function () {
-          const targetId = d3.select(this).attr("data-target-id");
-          if (!targetId) return d3.select(this).attr("transform");
-          const tPos = getPosition(targetId);
-          const sourceId = parentMap.get(targetId);
-          if (!sourceId) return d3.select(this).attr("transform");
-          const sPos = getPosition(sourceId);
-          const midX = (sPos.x + tPos.x) / 2;
-          const midY = (sPos.y + tPos.y) / 2;
-          return `translate(${midX},${midY})`;
-        });
-      });
-
-    this.setupAutoZoomAndResize(
-      svg,
-      g,
-      this.zoomBehavior!,
-      containerEl,
-      centerSimNode,
-      true,
-      false,
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
-  // PACK LAYOUT (R1/R2 grouped arcs around center)
-  // ═══════════════════════════════════════════════════════════════════
-
-  private renderPackLayout(): void {
-    if (!this.graphData) return;
-
-    const containerEl = this.container.nativeElement;
-    const width = containerEl.clientWidth;
-    const height = containerEl.clientHeight;
-
-    // Use persistent SVG
-    const svg = this.svg!;
-    const g = this.g!;
-
-    const simNodes: SimNode[] = this.graphData.nodes.map((n) => ({
-      id: n.id,
-      label: n.label,
-      type: n.type,
-      sigmpr: n.sigmpr,
-    }));
-
-    const nodeMap = new Map(simNodes.map((n) => [n.id, n]));
-
-    const simLinks: SimLink[] = this.graphData.edges.map((e) => ({
-      source: nodeMap.get(e.source)!,
-      target: nodeMap.get(e.target)!,
-      sourceId: e.source,
-      targetId: e.target,
-      edgeType: e.type,
-      dmsId: e.dmsId,
-    }));
-
-    const centerNode = simNodes.find(
-      (n) => n.id === this.graphData!.center.id,
-    )!;
-
-    const cx = width / 2;
-    const cy = height / 2;
-
-    // Pin center
-    const savedCenter = this.savedPositions.get(centerNode.id);
-    centerNode.fx = savedCenter ? savedCenter.x : cx;
-    centerNode.fy = savedCenter ? savedCenter.y : cy;
-    centerNode.x = centerNode.fx;
-    centerNode.y = centerNode.fy;
-
-    // Target positions for simulation gravity
-    const targetPositions = new Map<string, { x: number; y: number }>();
-    targetPositions.set(centerNode.id, { x: cx, y: cy });
-
-    // Separate R1 and R2 nodes into arcs
-    const neighbors = simNodes.filter(
-      (n) => n.id !== this.graphData!.center.id,
-    );
-    const r1Nodes = neighbors.filter((n) => n.type === "R1");
-    const r2Nodes = neighbors.filter((n) => n.type === "R2");
-
-    const groupRadius = 280;
-
-    // R1 cluster in left arc
-    if (r1Nodes.length > 0) {
-      const r1CenterAngle = -Math.PI / 2;
-      const r1Spread = Math.min(Math.PI, Math.PI / 2 + r1Nodes.length * 0.05);
-      r1Nodes.forEach((n, i) => {
-        const angle =
-          r1CenterAngle -
-          r1Spread / 2 +
-          (r1Nodes.length === 1 ? 0 : (r1Spread * i) / (r1Nodes.length - 1));
-        const targetX = cx + groupRadius * Math.cos(angle);
-        const targetY = cy + groupRadius * Math.sin(angle);
-        const saved = this.savedPositions.get(n.id);
-        n.x = saved ? saved.x : targetX;
-        n.y = saved ? saved.y : targetY;
-        targetPositions.set(n.id, { x: targetX, y: targetY });
-      });
-    }
-
-    // R2 cluster in right arc
-    if (r2Nodes.length > 0) {
-      const r2CenterAngle = Math.PI / 2;
-      const r2Spread = Math.min(Math.PI, Math.PI / 2 + r2Nodes.length * 0.05);
-      r2Nodes.forEach((n, i) => {
-        const angle =
-          r2CenterAngle -
-          r2Spread / 2 +
-          (r2Nodes.length === 1 ? 0 : (r2Spread * i) / (r2Nodes.length - 1));
-        const targetX = cx + groupRadius * Math.cos(angle);
-        const targetY = cy + groupRadius * Math.sin(angle);
-        const saved = this.savedPositions.get(n.id);
-        n.x = saved ? saved.x : targetX;
-        n.y = saved ? saved.y : targetY;
-        targetPositions.set(n.id, { x: targetX, y: targetY });
-      });
-    }
-
-    // Draw arc zone indicators (subtle)
-    if (r1Nodes.length > 0) {
-      g.append("text")
-        .attr("x", cx - groupRadius - 30)
-        .attr("y", cy - groupRadius + 20)
-        .attr("font-size", "12px")
-        .attr("font-weight", "600")
-        .attr("fill", this.COLOR_PRIMARY)
-        .attr("fill-opacity", 0.4)
-        .text("R1");
-    }
-
-    if (r2Nodes.length > 0) {
-      g.append("text")
-        .attr("x", cx + groupRadius - 10)
-        .attr("y", cy + groupRadius + 20)
-        .attr("font-size", "12px")
-        .attr("font-weight", "600")
-        .attr("fill", this.COLOR_ON_PRIMARY_CONTAINER)
-        .attr("fill-opacity", 0.4)
-        .text("R2");
-    }
-
-    const parallelCounts = this.countParallelEdges(simLinks);
-    const groupIndexMap = new Map<string, number>();
-    for (const link of simLinks) {
-      const key = [link.sourceId, link.targetId].sort().join("|");
-      const idx = groupIndexMap.get(key) || 0;
-      groupIndexMap.set(key, idx + 1);
-      (link as any)._parallelIndex = idx;
-    }
-
-    // ── Neighbor nodes ──
-    const neighborNodes = g
-      .append("g")
-      .attr("class", "neighbor-nodes")
-      .selectAll("g")
-      .data(simNodes.filter((n) => n.id !== this.graphData!.center.id))
-      .enter()
-      .append("g")
-      .attr("data-node-id", (d) => d.id)
-      .attr("transform", (d) => `translate(${d.x},${d.y})`)
-      .attr("cursor", "pointer");
-
-    // ── Edge paths ──
-    const edgeGroup = g.append("g").attr("class", "edges");
-    const edgePaths = this.createEdgePaths(edgeGroup, simLinks);
-
-    // ── Edge labels ──
-    const labelGroup = g.append("g").attr("class", "edge-labels");
-    const edgeLabels = this.createEdgeLabels(labelGroup, simLinks);
-
-    // ── Neighbor nodes (rendered after edges so they appear on top) ──
-    this.drawNodeCircles(neighborNodes, false);
-    neighborNodes.raise();
-
-    // ── Center node on top ──
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const centerNodeEl: any = g
-      .append("g")
-      .attr("class", "center-node")
-      .attr("data-node-id", centerNode.id)
-      .datum(centerNode)
-      .attr("transform", `translate(${centerNode.x},${centerNode.y})`);
-
-    this.drawNodeCircles(centerNodeEl, true, centerNode);
-
-    // ── Tooltip ──
-    const linkLabelsGroup = g.append("g").attr("class", "link-labels");
-    this.addEdgeTooltip(edgePaths, linkLabelsGroup, simLinks);
-
-    // Hover interactions
-    this.addNeighborHover(
-      neighborNodes,
-      edgePaths,
-      edgeLabels,
-      simLinks,
-      centerNodeEl,
-    );
-
-    centerNodeEl
-      .on("mouseenter", () => {
-        const centerId = this.graphData!.center.id;
-        neighborNodes.attr("opacity", 0.25);
-        centerNodeEl.attr("opacity", 1);
-        edgePaths.attr("opacity", (l: SimLink) =>
-          l.sourceId === centerId || l.targetId === centerId ? 1 : 0.12,
-        );
-        edgeLabels.attr("opacity", (l: SimLink) =>
-          l.sourceId === centerId || l.targetId === centerId ? 1 : 0.12,
-        );
-      })
-      .on("mouseleave", () => {
-        neighborNodes.attr("opacity", 1);
-        centerNodeEl.attr("opacity", 1);
-        edgePaths.attr("opacity", 1);
-        edgeLabels.attr("opacity", 1);
-      });
-
-    // ── Path computation ──
-    const targetRadius = (id: string): number => {
-      const n = simNodes.find((n) => n.id === id);
-      return n ? this.NODE_RADIUS[n.type] : 20;
-    };
-
-    const computePath = (d: SimLink): string =>
-      this.computeEdgePath(d, parallelCounts, targetRadius);
-
-    // Initial render
-    edgePaths.attr("d", computePath);
-    neighborNodes.attr("transform", (d) => `translate(${d.x},${d.y})`);
-    centerNodeEl.attr(
-      "transform",
-      `translate(${centerNode.x},${centerNode.y})`,
-    );
-    this.updateEdgeLabelsForce(edgeLabels, simLinks, parallelCounts);
-
-    // ── Drag behavior ──
-    neighborNodes.call(
-      d3
-        .drag<SVGGElement, SimNode>()
-        .on("start", (event, d) => {
-          if (!event.active) this.simulation?.alphaTarget(0.3).restart();
-          d.fx = d.x;
-          d.fy = d.y;
-        })
-        .on("drag", (event, d) => {
-          d.fx = event.x;
-          d.fy = event.y;
-        })
-        .on("end", (event, d) => {
-          if (!event.active) this.simulation?.alphaTarget(0);
-          d.fx = null;
-          d.fy = null;
-        }),
-    );
-
-    // ── Force simulation ──
-    this.simulation = d3
-      .forceSimulation<SimNode>(simNodes)
-      .force(
-        "x",
-        d3
-          .forceX<SimNode>((d) => {
-            const target = targetPositions.get(d.id);
-            return target ? target.x : width / 2;
-          })
-          .strength(0.1),
-      )
-      .force(
-        "y",
-        d3
-          .forceY<SimNode>((d) => {
-            const target = targetPositions.get(d.id);
-            return target ? target.y : height / 2;
-          })
-          .strength(0.1),
-      )
-      .force("collide", d3.forceCollide().radius(90).strength(0.8))
-      .on("tick", () => {
-        neighborNodes.attr("transform", (d) => `translate(${d.x},${d.y})`);
-        centerNodeEl.attr(
-          "transform",
-          `translate(${centerNode.x},${centerNode.y})`,
-        );
-        edgePaths.attr("d", computePath);
-        this.updateEdgeLabelsForce(edgeLabels, simLinks, parallelCounts);
-      });
-
-    this.setupAutoZoomAndResize(
-      svg,
-      g,
-      this.zoomBehavior!,
-      containerEl,
-      centerNode,
-      true,
-      true,
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
   // SHARED HELPERS
   // ═══════════════════════════════════════════════════════════════════
 
@@ -1885,7 +1173,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M0,-4L8,0L0,4")
-      .attr("fill", this.COLOR_TERTIARY);
+      .attr("fill", COLOR_TERTIARY);
 
     defs
       .append("marker")
@@ -1898,7 +1186,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M0,-4L8,0L0,4")
-      .attr("fill", this.COLOR_PRIMARY);
+      .attr("fill", COLOR_PRIMARY);
 
     // Reversed arrow for logistics: points opposite to path direction (towards source)
     defs
@@ -1912,7 +1200,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M8,-4L0,0L8,4")
-      .attr("fill", this.COLOR_PRIMARY);
+      .attr("fill", COLOR_PRIMARY);
   }
 
   private drawNodeCircles(
@@ -1925,9 +1213,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
     if (isCenter) {
       selection
         .append("circle")
-        .attr("r", this.NODE_RADIUS.SITE)
-        .attr("fill", this.NODE_COLORS.SITE)
-        .attr("stroke", this.COLOR_ELECTRIC)
+        .attr("r", NODE_RADIUS.SITE)
+        .attr("fill", NODE_COLORS.SITE)
+        .attr("stroke", COLOR_ELECTRIC)
         .attr("stroke-width", 1.5);
 
       selection
@@ -1937,54 +1225,54 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("text-anchor", "middle")
         .attr("font-size", "9px")
         .attr("font-weight", "700")
-        .attr("fill", this.NODE_TEXT_COLORS.SITE)
+        .attr("fill", NODE_TEXT_COLORS.SITE)
         .attr("pointer-events", "none");
 
       if (centerNode) {
         selection
           .append("text")
           .text(centerNode.label)
-          .attr("dy", this.NODE_RADIUS.SITE + 16)
+          .attr("dy", NODE_RADIUS.SITE + 16)
           .attr("text-anchor", "middle")
           .attr("font-size", "13px")
           .attr("font-weight", "700")
-          .attr("fill", this.NODE_LABEL_COLORS.SITE)
+          .attr("fill", NODE_LABEL_COLORS.SITE)
           .attr("pointer-events", "none");
       }
     } else {
       selection
         .append("circle")
-        .attr("r", (d: SimNode) => this.NODE_RADIUS[d.type] + 4)
+        .attr("r", (d: SimNode) => NODE_RADIUS[d.type] + 4)
         .attr("fill", "none")
-        .attr("stroke", this.COLOR_ON_PRIMARY)
+        .attr("stroke", (d: SimNode) => NODE_STROKE_COLORS[d.type])
         .attr("stroke-width", 1.5)
         .attr("stroke-opacity", 0.4);
 
       selection
         .append("circle")
-        .attr("r", (d: SimNode) => this.NODE_RADIUS[d.type])
-        .attr("fill", (d: SimNode) => this.NODE_COLORS[d.type])
-        .attr("stroke", (d: SimNode) => this.NODE_STROKE_COLORS[d.type])
+        .attr("r", (d: SimNode) => NODE_RADIUS[d.type])
+        .attr("fill", (d: SimNode) => NODE_COLORS[d.type])
+        .attr("stroke", (d: SimNode) => NODE_STROKE_COLORS[d.type])
         .attr("stroke-width", 2.5);
 
       selection
         .append("text")
-        .text((d: SimNode) => this.NODE_LABELS[d.type])
+        .text((d: SimNode) => NODE_LABELS[d.type])
         .attr("dy", "0.35em")
         .attr("text-anchor", "middle")
         .attr("font-size", "10px")
         .attr("font-weight", "700")
-        .attr("fill", (d: SimNode) => this.NODE_TEXT_COLORS[d.type])
+        .attr("fill", (d: SimNode) => NODE_TEXT_COLORS[d.type])
         .attr("pointer-events", "none");
 
       selection
         .append("text")
         .text((d: SimNode) => d.label)
-        .attr("dy", (d: SimNode) => this.NODE_RADIUS[d.type] + 16)
+        .attr("dy", (d: SimNode) => NODE_RADIUS[d.type] + 16)
         .attr("text-anchor", "middle")
         .attr("font-size", "12px")
         .attr("font-weight", "500")
-        .attr("fill", (d: SimNode) => this.NODE_LABEL_COLORS[d.type])
+        .attr("fill", (d: SimNode) => NODE_LABEL_COLORS[d.type])
         .attr("pointer-events", "none");
 
       // SIGMPR mini-tag for R1 nodes
@@ -1995,17 +1283,17 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .append("rect")
         .attr("rx", 6)
         .attr("ry", 6)
-        .attr("fill", this.COLOR_PRIMARY)
+        .attr("fill", (d: SimNode) => NODE_STROKE_COLORS[d.type])
         .attr("fill-opacity", 0.9);
 
       const sigmprTextEls = r1WithSigmpr
         .append("text")
-        .text((d: SimNode) => `SIG:${d.sigmpr!}`)
-        .attr("dy", (d: SimNode) => this.NODE_RADIUS[d.type] + 32)
+        .text((d: SimNode) => `SIGMPR:${d.sigmpr!}`)
+        .attr("dy", (d: SimNode) => NODE_RADIUS[d.type] + 32)
         .attr("text-anchor", "middle")
         .attr("font-size", "7px")
         .attr("font-weight", "700")
-        .attr("fill", this.COLOR_ON_PRIMARY)
+        .attr("fill", COLOR_ON_PRIMARY)
         .attr("pointer-events", "none");
 
       r1WithSigmpr.each(function (d: SimNode, i: number) {
@@ -2037,7 +1325,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .append("path")
       .attr("fill", "none")
       .attr("stroke", (d: SimLink) =>
-        d.edgeType === "ANIMATION" ? this.COLOR_TERTIARY : this.COLOR_PRIMARY,
+        d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
       )
       .attr("stroke-width", 1.5)
       .attr("stroke-linecap", "round")
@@ -2046,7 +1334,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
       )
       .attr("marker-start", (d: SimLink) =>
         d.edgeType === "LOGISTICS" ? "url(#arrow-logistics-rev)" : null,
-      );
+      )
+      .attr("data-source-id", (d: SimLink) => d.sourceId)
+      .attr("data-target-id", (d: SimLink) => d.targetId);
   }
 
   private createEdgeLabels(
@@ -2060,7 +1350,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .data(simLinks)
       .enter()
       .append("g")
-      .attr("class", "edge-label");
+      .attr("class", "edge-label")
+      .attr("data-source-id", (d: SimLink) => d.sourceId)
+      .attr("data-target-id", (d: SimLink) => d.targetId);
 
     edgeLabels
       .append("rect")
@@ -2074,7 +1366,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("dy", "0.35em")
       .attr("font-size", "10px")
       .attr("font-weight", "700")
-      .attr("fill", this.COLOR_ON_PRIMARY)
+      .attr("fill", COLOR_ON_PRIMARY)
       .text((d: SimLink) =>
         d.edgeType === "ANIMATION" ? "A" : d.dmsId ? `DMS:${d.dmsId}` : "L",
       );
@@ -2111,7 +1403,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("y", midY - 14)
           .attr("width", 10)
           .attr("height", 22)
-          .attr("fill", this.COLOR_ON_PRIMARY_CONTAINER)
+          .attr("fill", COLOR_ON_PRIMARY_CONTAINER)
           .attr("rx", 4)
           .attr("opacity", 0);
 
@@ -2124,7 +1416,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("dy", "0.35em")
           .attr("font-size", "11px")
           .attr("font-weight", "600")
-          .attr("fill", this.COLOR_ON_PRIMARY)
+          .attr("fill", COLOR_ON_PRIMARY)
           .text(text);
 
         const textBBox = linkLabelsGroup
@@ -2144,6 +1436,199 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .on("mouseleave", () => {
         linkLabelsGroup.selectAll(".tooltip-rect, .tooltip-text").remove();
       });
+  }
+
+  private applyNodeSelection(): void {
+    if (!this.g || !this.graphData) return;
+
+    const self = this;
+    const g = this.g;
+    const allNodes = g.selectAll("[data-node-id]");
+
+    if (!this.selectedNodeId) {
+      // Reset all opacity to 1
+      allNodes.attr("opacity", 1);
+      g.selectAll(".tree-links path, .edges path").attr("opacity", 1);
+      g.selectAll(".link-badges g, .edge-labels g").attr("opacity", 1);
+
+      // Reset node colors to default
+      allNodes.each(function () {
+        const nodeGroup = d3.select(this);
+        const nodeId = nodeGroup.attr("data-node-id");
+        if (!nodeId) return;
+        const isCenter = nodeId === self.graphData!.center.id;
+        if (isCenter) return;
+
+        const nodeType = self.graphData!.nodes.find(
+          (n) => n.id === nodeId,
+        )?.type;
+        if (!nodeType) return;
+
+        const circles = nodeGroup.selectAll("circle");
+        const innerCircle = circles.filter(function () {
+          const r = d3.select(this).attr("r");
+          return r === "30" || r === "22";
+        });
+
+        innerCircle.attr("fill", NODE_COLORS[nodeType]);
+        innerCircle.attr("stroke", NODE_STROKE_COLORS[nodeType]);
+        circles
+          .filter(function () {
+            const r = d3.select(this).attr("r");
+            return r === "34" || r === "26";
+          })
+          .attr("stroke", NODE_STROKE_COLORS[nodeType])
+          .attr("stroke-opacity", 0.4);
+      });
+
+      // Reset link colors
+      g.selectAll(".edges path").each(function () {
+        const el = d3.select(this);
+        const edgeType = el.attr("data-edge-type");
+        if (edgeType === "ANIMATION") {
+          el.attr("stroke", COLOR_TERTIARY);
+        } else {
+          el.attr("stroke", COLOR_PRIMARY);
+        }
+      });
+
+      return;
+    }
+
+    const selectedId = this.selectedNodeId;
+    const centerId = this.graphData.center.id;
+
+    if (this.layoutMode === "tree") {
+      // Hierarchy modes: highlight ancestors + descendants
+      const hierarchyData = this.buildHierarchy();
+      const root = d3.hierarchy(hierarchyData);
+
+      // Apply collapsed state
+      root.each((node: any) => {
+        if (this.collapsedBranches.has(node.data.id) && node.children) {
+          (node as any)._children = node.children;
+          node.children = null;
+        }
+      });
+
+      // Build ancestor and descendant maps
+      const ancestorMap = new Map<string, Set<string>>();
+      const descendantMap = new Map<string, Set<string>>();
+      root.descendants().forEach((d: any) => {
+        const ancestorIds = new Set<string>();
+        d.ancestors().forEach((a: any) => ancestorIds.add(a.data.id));
+        ancestorMap.set(d.data.id, ancestorIds);
+
+        const descendantIds = new Set<string>();
+        d.descendants().forEach((a: any) => descendantIds.add(a.data.id));
+        descendantMap.set(d.data.id, descendantIds);
+      });
+
+      const ancestors = ancestorMap.get(selectedId) || new Set<string>();
+      const descendants = descendantMap.get(selectedId) || new Set<string>();
+      const highlighted = new Set([...ancestors, ...descendants]);
+
+      allNodes.attr("opacity", function () {
+        const nodeId = d3.select(this).attr("data-node-id");
+        return nodeId && highlighted.has(nodeId) ? 1 : 0.25;
+      });
+
+      const linkClass =
+        this.layoutMode === "tree" ? ".tree-links path" : ".edges path";
+      g.selectAll(linkClass).attr("opacity", function () {
+        const el = d3.select(this);
+        const sourceId = el.attr("data-source-id");
+        const targetId = el.attr("data-target-id");
+        return sourceId &&
+          targetId &&
+          highlighted.has(sourceId) &&
+          highlighted.has(targetId)
+          ? 1
+          : 0.12;
+      });
+
+      g.selectAll(".link-badges g").attr("opacity", function () {
+        const targetId = d3.select(this).attr("data-target-id");
+        return targetId && highlighted.has(targetId) ? 1 : 0.12;
+      });
+    } else {
+      // Force/Pack modes: highlight connected edges
+      const connectedNodeIds = new Set<string>([selectedId, centerId]);
+      this.graphData.edges.forEach((edge) => {
+        if (edge.source === selectedId || edge.target === selectedId) {
+          connectedNodeIds.add(edge.source);
+          connectedNodeIds.add(edge.target);
+        }
+      });
+
+      allNodes.attr("opacity", function () {
+        const nodeId = d3.select(this).attr("data-node-id");
+        return nodeId && connectedNodeIds.has(nodeId) ? 1 : 0.25;
+      });
+
+      g.selectAll(".edges path").attr("opacity", function () {
+        const el = d3.select(this);
+        const sourceId = el.attr("data-source-id");
+        const targetId = el.attr("data-target-id");
+        if (!sourceId || !targetId) return 0.12;
+        return sourceId === selectedId || targetId === selectedId ? 1 : 0.12;
+      });
+
+      g.selectAll(".edge-labels g").attr("opacity", function () {
+        const el = d3.select(this);
+        const sourceId = el.attr("data-source-id");
+        const targetId = el.attr("data-target-id");
+        if (!sourceId || !targetId) return 0.12;
+        return sourceId === selectedId || targetId === selectedId ? 1 : 0.12;
+      });
+    }
+
+    // Change colors of selected node to Electric colors
+    allNodes.each(function () {
+      const nodeGroup = d3.select(this);
+      const nodeId = nodeGroup.attr("data-node-id");
+      if (!nodeId) return;
+
+      const isSelected = nodeId === selectedId;
+      const isCenter = nodeId === centerId;
+
+      // Find the inner circle (r = NODE_RADIUS)
+      const circles = nodeGroup.selectAll("circle");
+      const innerCircle = circles.filter(function () {
+        const r = d3.select(this).attr("r");
+        return r === "30" || r === "22";
+      });
+
+      if (isSelected && !isCenter) {
+        // Selected R1/R2: use Electric colors
+        innerCircle.attr("fill", COLOR_ELECTRIC_CONTAINER);
+        innerCircle.attr("stroke", COLOR_ELECTRIC);
+        // Also update outer circle
+        circles
+          .filter(function () {
+            const r = d3.select(this).attr("r");
+            return r === "34" || r === "26";
+          })
+          .attr("stroke", COLOR_ELECTRIC)
+          .attr("stroke-opacity", 0.4);
+      } else if (!isCenter) {
+        // Reset to default container colors
+        const nodeType = self.graphData!.nodes.find(
+          (n) => n.id === nodeId,
+        )?.type;
+        if (nodeType) {
+          innerCircle.attr("fill", NODE_COLORS[nodeType]);
+          innerCircle.attr("stroke", NODE_STROKE_COLORS[nodeType]);
+          circles
+            .filter(function () {
+              const r = d3.select(this).attr("r");
+              return r === "34" || r === "26";
+            })
+            .attr("stroke", NODE_STROKE_COLORS[nodeType])
+            .attr("stroke-opacity", 0.4);
+        }
+      }
+    });
   }
 
   private addNeighborHover(
@@ -2181,10 +1666,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
         );
       })
       .on("mouseleave", () => {
-        neighborNodes.attr("opacity", 1);
-        if (centerNodeEl) centerNodeEl.attr("opacity", 1);
-        edgePaths.attr("opacity", 1);
-        edgeLabels.attr("opacity", 1);
+        if (this.selectedNodeId) {
+          this.applyNodeSelection();
+        } else {
+          neighborNodes.attr("opacity", 1);
+          if (centerNodeEl) centerNodeEl.attr("opacity", 1);
+          edgePaths.attr("opacity", 1);
+          edgeLabels.attr("opacity", 1);
+        }
       });
   }
 
@@ -2212,10 +1701,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
         );
       })
       .on("mouseleave", () => {
-        neighborNodes.attr("opacity", 1);
-        centerNodeEl.attr("opacity", 1);
-        edgePaths.attr("opacity", 1);
-        edgeLabels.attr("opacity", 1);
+        if (this.selectedNodeId) {
+          this.applyNodeSelection();
+        } else {
+          neighborNodes.attr("opacity", 1);
+          centerNodeEl.attr("opacity", 1);
+          edgePaths.attr("opacity", 1);
+          edgeLabels.attr("opacity", 1);
+        }
       });
   }
 
@@ -2283,9 +1776,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
         }
       })
       .on("mouseleave", () => {
-        nodeGroups.attr("opacity", 1);
-        linkPathSelection.attr("opacity", 1);
-        badgeGroup.selectAll("g").attr("opacity", 1);
+        if (this.selectedNodeId) {
+          this.applyNodeSelection();
+        } else {
+          nodeGroups.attr("opacity", 1);
+          linkPathSelection.attr("opacity", 1);
+          badgeGroup.selectAll("g").attr("opacity", 1);
+        }
       });
 
     // Edge tooltip on hover
@@ -2329,7 +1826,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("y", midY - 14)
           .attr("width", 10)
           .attr("height", 22)
-          .attr("fill", this.COLOR_ON_PRIMARY_CONTAINER)
+          .attr("fill", COLOR_ON_PRIMARY_CONTAINER)
           .attr("rx", 4)
           .attr("opacity", 0);
 
@@ -2342,7 +1839,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("dy", "0.35em")
           .attr("font-size", "11px")
           .attr("font-weight", "600")
-          .attr("fill", this.COLOR_ON_PRIMARY)
+          .attr("fill", COLOR_ON_PRIMARY)
           .text(text);
 
         const textBBox = tooltipGroup
@@ -2378,7 +1875,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     const key = [d.sourceId, d.targetId].sort().join("|");
     const total = parallelCounts.get(key) || 1;
-    const offset = this.getLinkOffset(
+    const offset = GraphComponent.getLinkOffsetStatic(
       d,
       parallelCounts,
       (d as any)._parallelIndex,
@@ -2395,7 +1892,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     if (total <= 1) {
       if (isLogistics) {
         // Shorten at source end for reversed arrow
-        const sr = this.NODE_RADIUS[src.type] || 22;
+        const sr = NODE_RADIUS[src.type] || 22;
         const startX = sx + (dx / len) * sr;
         const startY = sy + (dy / len) * sr;
         return `M${startX},${startY}L${tx},${ty}`;
@@ -2416,7 +1913,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     if (isLogistics) {
       // Shorten at source end for reversed arrow
-      const sr = this.NODE_RADIUS[src.type] || 22;
+      const sr = NODE_RADIUS[src.type] || 22;
       const sdx = cx - sx;
       const sdy = cy - sy;
       const slen = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
@@ -2471,56 +1968,6 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
       el.select("text:not(.label-dmsid)").attr("x", mx).attr("y", my);
       el.select(".label-dmsid").attr("x", mx).attr("y", my);
-      el.select("rect").attr("x", mx).attr("y", my);
-
-      if (textEl) {
-        const bbox = textEl.getBBox();
-        rectEl.setAttribute("x", String(bbox.x - 5));
-        rectEl.setAttribute("y", String(bbox.y - 2));
-        rectEl.setAttribute("width", String(bbox.width + 10));
-        rectEl.setAttribute("height", String(bbox.height + 4));
-      }
-
-      const color = d.edgeType === "ANIMATION" ? "#2E2ECA" : "#978B7F";
-      rectEl.setAttribute("fill", color);
-      rectEl.setAttribute("fill-opacity", "0.9");
-    });
-  }
-
-  private updateEdgeLabelsOnce(
-    edgeLabels: d3.Selection<SVGGElement, SimLink, SVGGElement, unknown>,
-    simLinks: SimLink[],
-    parallelCounts: Map<string, number>,
-  ): void {
-    edgeLabels.each(function (d: SimLink) {
-      const src = d.source as SimNode;
-      const tgt = d.target as SimNode;
-      const sx = src.x!;
-      const sy = src.y!;
-      const tx = tgt.x!;
-      const ty = tgt.y!;
-
-      const key = [d.sourceId, d.targetId].sort().join("|");
-      const parallelOffset = GraphComponent.getLinkOffsetStatic(
-        d,
-        parallelCounts,
-        (d as any)._parallelIndex,
-      );
-
-      const dx = tx - sx;
-      const dy = ty - sy;
-      const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      const px = -dy / len;
-      const py = dx / len;
-
-      const mx = (sx + tx) / 2 + px * parallelOffset;
-      const my = (sy + ty) / 2 + py * parallelOffset;
-
-      const el = d3.select(this);
-      const textEl = el.select("text").node() as SVGTextElement;
-      const rectEl = el.select("rect").node() as SVGRectElement;
-
-      el.select("text").attr("x", mx).attr("y", my);
       el.select("rect").attr("x", mx).attr("y", my);
 
       if (textEl) {

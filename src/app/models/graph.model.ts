@@ -1,6 +1,6 @@
 export type NodeType = "SITE" | "R1" | "R2";
 
-export type LayoutMode = "force" | "tree" | "radial" | "pack";
+export type LayoutMode = "force" | "tree";
 
 export interface Node {
   id: string;
@@ -38,15 +38,5 @@ export const LAYOUT_MODES: {
     value: "tree",
     label: "Arborescence",
     description: "Disposition hiérarchique en arbre",
-  },
-  {
-    value: "radial",
-    label: "Radial",
-    description: "Disposition radiale autour du site",
-  },
-  {
-    value: "pack",
-    label: "Pack",
-    description: "Cercles emboîtés par type (R1/R2)",
   },
 ];
