@@ -726,12 +726,16 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("data-target-id", childData.id)
         .attr("transform", `translate(${midX},${midY})`);
 
+      badgeG.append("rect").attr("rx", 6).attr("ry", 6).attr("fill", "white");
+
       badgeG
         .append("rect")
-        .attr("rx", 8)
-        .attr("ry", 8)
+        .attr("rx", 6)
+        .attr("ry", 6)
         .attr("fill", color)
-        .attr("fill-opacity", 0.9);
+        .attr("fill-opacity", 0.15)
+        .attr("stroke", color)
+        .attr("stroke-width", 1.5);
 
       const textEl = badgeG
         .append("text")
@@ -739,12 +743,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("dy", "0.35em")
         .attr("font-size", childData.dmsId ? "7px" : "9px")
         .attr("font-weight", "700")
-        .attr("fill", COLOR_ON_PRIMARY)
+        .attr("fill", color)
         .text(badgeText);
 
       const bbox = (textEl.node() as SVGTextElement).getBBox();
       badgeG
-        .select("rect")
+        .selectAll("rect")
         .attr("x", bbox.x - 4)
         .attr("y", bbox.y - 2)
         .attr("width", bbox.width + 8)
@@ -923,8 +927,15 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .append("rect")
           .attr("rx", 6)
           .attr("ry", 6)
+          .attr("fill", "white");
+        sigmprG
+          .append("rect")
+          .attr("rx", 6)
+          .attr("ry", 6)
           .attr("fill", sigmprColor)
-          .attr("fill-opacity", 0.9);
+          .attr("fill-opacity", 0.15)
+          .attr("stroke", sigmprColor)
+          .attr("stroke-width", 1.5);
         const sigmprTextEl = sigmprG
           .append("text")
           .text(sigmprText)
@@ -933,11 +944,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .attr("text-anchor", "start")
           .attr("font-size", "7px")
           .attr("font-weight", "700")
-          .attr("fill", COLOR_ON_PRIMARY)
+          .attr("fill", sigmprColor)
           .attr("pointer-events", "none");
         const sigmprBbox = (sigmprTextEl.node() as SVGTextElement).getBBox();
         sigmprG
-          .select("rect")
+          .selectAll("rect")
           .attr("x", sigmprBbox.x - 3)
           .attr("y", sigmprBbox.y - 1.5)
           .attr("width", sigmprBbox.width + 6)
@@ -1283,8 +1294,15 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .append("rect")
         .attr("rx", 6)
         .attr("ry", 6)
+        .attr("fill", "white");
+      r1WithSigmpr
+        .append("rect")
+        .attr("rx", 6)
+        .attr("ry", 6)
         .attr("fill", (d: SimNode) => NODE_STROKE_COLORS[d.type])
-        .attr("fill-opacity", 0.9);
+        .attr("fill-opacity", 0.15)
+        .attr("stroke", (d: SimNode) => NODE_STROKE_COLORS[d.type])
+        .attr("stroke-width", 1.5);
 
       const sigmprTextEls = r1WithSigmpr
         .append("text")
@@ -1293,7 +1311,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .attr("text-anchor", "middle")
         .attr("font-size", "7px")
         .attr("font-weight", "700")
-        .attr("fill", COLOR_ON_PRIMARY)
+        .attr("fill", (d: SimNode) => NODE_STROKE_COLORS[d.type])
         .attr("pointer-events", "none");
 
       r1WithSigmpr.each(function (d: SimNode, i: number) {
@@ -1302,7 +1320,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         if (textEl) {
           const bbox = textEl.getBBox();
           d3.select(this)
-            .select("rect:last-of-type")
+            .selectAll("rect")
             .attr("x", bbox.x - 3)
             .attr("y", bbox.y - 1.5)
             .attr("width", bbox.width + 6)
@@ -1354,10 +1372,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("data-source-id", (d: SimLink) => d.sourceId)
       .attr("data-target-id", (d: SimLink) => d.targetId);
 
+    edgeLabels.append("rect").attr("rx", 6).attr("ry", 6).attr("fill", "white");
+
     edgeLabels
       .append("rect")
-      .attr("rx", 8)
-      .attr("ry", 8)
+      .attr("rx", 6)
+      .attr("ry", 6)
       .attr("class", "label-bg");
 
     edgeLabels
@@ -1366,7 +1386,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("dy", "0.35em")
       .attr("font-size", "10px")
       .attr("font-weight", "700")
-      .attr("fill", COLOR_ON_PRIMARY)
+      .attr("fill", (d: SimLink) =>
+        d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+      )
       .text((d: SimLink) =>
         d.edgeType === "ANIMATION" ? "A" : d.dmsId ? `DMS:${d.dmsId}` : "L",
       );
@@ -1964,23 +1986,32 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const textEl = el
         .select("text:not(.label-dmsid)")
         .node() as SVGTextElement;
-      const rectEl = el.select("rect").node() as SVGRectElement;
 
       el.select("text:not(.label-dmsid)").attr("x", mx).attr("y", my);
       el.select(".label-dmsid").attr("x", mx).attr("y", my);
-      el.select("rect").attr("x", mx).attr("y", my);
 
       if (textEl) {
         const bbox = textEl.getBBox();
-        rectEl.setAttribute("x", String(bbox.x - 5));
-        rectEl.setAttribute("y", String(bbox.y - 2));
-        rectEl.setAttribute("width", String(bbox.width + 10));
-        rectEl.setAttribute("height", String(bbox.height + 4));
+        el.selectAll("rect")
+          .attr("x", String(bbox.x - 4))
+          .attr("y", String(bbox.y - 2))
+          .attr("width", String(bbox.width + 8))
+          .attr("height", String(bbox.height + 4));
+      } else {
+        el.selectAll("rect").attr("x", mx).attr("y", my);
       }
 
-      const color = d.edgeType === "ANIMATION" ? "#2E2ECA" : "#978B7F";
-      rectEl.setAttribute("fill", color);
-      rectEl.setAttribute("fill-opacity", "0.9");
+      const color = d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+
+      // White background rect (first)
+      el.select("rect:first-of-type").attr("fill", "white");
+
+      // Colored overlay rect (second / label-bg)
+      el.select(".label-bg")
+        .attr("fill", color)
+        .attr("fill-opacity", "0.15")
+        .attr("stroke", color)
+        .attr("stroke-width", "1.5");
     });
   }
 
