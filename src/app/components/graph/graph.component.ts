@@ -1,4 +1,6 @@
 import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
   Component,
   ElementRef,
   Input,
@@ -8,7 +10,28 @@ import {
   ViewChild,
 } from "@angular/core";
 import { CommonModule } from "@angular/common";
-import * as d3 from "d3";
+
+// Selective D3 imports for tree-shaking (P1)
+import "d3-transition"; // side-effect: patches Selection prototype with .transition()
+import {
+  forceSimulation,
+  forceLink,
+  forceManyBody,
+  forceCenter,
+  forceCollide,
+  forceX,
+  forceY,
+  type SimulationNodeDatum,
+  type SimulationLinkDatum,
+  type Simulation,
+} from "d3-force";
+import { hierarchy, tree, cluster } from "d3-hierarchy";
+import { select, pointer, type Selection } from "d3-selection";
+import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
+import { drag } from "d3-drag";
+import { timer, type Timer } from "d3-timer";
+import { interpolateRgb } from "d3-interpolate";
+
 import { GraphData, NodeType, LayoutMode } from "../../models/graph.model";
 import {
   COLOR_PRIMARY,
@@ -34,14 +57,14 @@ import {
   LINK_DISTANCE,
 } from "../../models/colors";
 
-interface SimNode extends d3.SimulationNodeDatum {
+interface SimNode extends SimulationNodeDatum {
   id: string;
   label: string;
   type: NodeType;
   sigmpr?: string;
 }
 
-interface SimLink extends d3.SimulationLinkDatum<SimNode> {
+interface SimLink extends SimulationLinkDatum<SimNode> {
   edgeType: "ANIMATION" | "LOGISTICS";
   sourceId: string;
   targetId: string;
@@ -66,6 +89,7 @@ interface HierarchyDatum {
   imports: [CommonModule],
   templateUrl: "./graph.component.html",
   styleUrls: ["./graph.component.scss"],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class GraphComponent implements OnChanges, OnDestroy {
   @Input() graphData: GraphData | null = null;
@@ -76,11 +100,10 @@ export class GraphComponent implements OnChanges, OnDestroy {
   container!: ElementRef<HTMLDivElement>;
 
   // Persistent SVG state
-  private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null =
-    null;
-  private g: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
-  private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
-  private simulation: d3.Simulation<SimNode, SimLink> | null = null;
+  private svg: Selection<SVGSVGElement, unknown, null, undefined> | null = null;
+  private g: Selection<SVGGElement, unknown, null, undefined> | null = null;
+  private zoomBehavior: ZoomBehavior<SVGSVGElement, unknown> | null = null;
+  private simulation: Simulation<SimNode, SimLink> | null = null;
   private resizeObserver: ResizeObserver | null = null;
 
   // Saved positions for smooth layout transitions
@@ -96,21 +119,42 @@ export class GraphComponent implements OnChanges, OnDestroy {
   private readonly SELECTION_TRANSITION_MS = 250;
 
   // Electric current animation timer
-  private selectionAnimTimer: d3.Timer | null = null;
+  private selectionAnimTimer: Timer | null = null;
   private readonly ELECTRIC_DASH = "10 4 4 4"; // dasharray pattern
   private readonly ELECTRIC_DASH_PERIOD = 22; // total period of dasharray
   private readonly ELECTRIC_FLOW_DURATION = 800; // ms for one full cycle
   private readonly ELECTRIC_COLOR_WAVE_DURATION = 2000; // ms for color oscillation
 
+  // P8: Pre-computed electric color interpolation (30 steps)
+  private readonly ELECTRIC_COLORS: string[] = Array.from(
+    { length: 30 },
+    (_, i) => {
+      const colorT = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / 30);
+      return interpolateRgb(COLOR_ELECTRIC, COLOR_TERTIARY)(colorT);
+    },
+  );
+  private readonly ELECTRIC_COLOR_COUNT = this.ELECTRIC_COLORS.length;
+  private readonly ANIM_FRAME_MS = 1000 / 30; // ~30 fps for electric animation
+
+  // P7: Cached hierarchy
+  private cachedHierarchy: HierarchyDatum | null = null;
+  private cachedHierarchyKey: string | null = null;
+
+  constructor(private cdr: ChangeDetectorRef) {}
+
   ngOnChanges(changes: SimpleChanges): void {
     if (!this.graphData) return;
 
+    this.cdr.markForCheck();
+
     if (changes["graphData"]) {
-      // Data changed → full rebuild
+      // Data changed → full rebuild (P7: also invalidate hierarchy cache)
       this.stopElectricAnimation();
       this.destroySvg();
       this.savedPositions.clear();
       this.collapsedBranches.clear();
+      this.cachedHierarchy = null;
+      this.cachedHierarchyKey = null;
       this.selectedNodeId = null;
       this.renderGraph();
       // Apply search node selection after graph rebuild
@@ -156,7 +200,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       this.resizeObserver = null;
     }
     if (this.svg) {
-      d3.select(this.container.nativeElement).select("svg").remove();
+      select(this.container.nativeElement).select("svg").remove();
       this.svg = null;
       this.g = null;
       this.zoomBehavior = null;
@@ -168,8 +212,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const width = containerEl.clientWidth;
     const height = containerEl.clientHeight;
 
-    this.svg = d3
-      .select(containerEl)
+    this.svg = select(containerEl)
       .append("svg")
       .attr("width", width)
       .attr("height", height);
@@ -179,8 +222,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     this.g = this.svg.append("g");
 
-    this.zoomBehavior = d3
-      .zoom<SVGSVGElement, unknown>()
+    this.zoomBehavior = zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.3, 3])
       .on("zoom", (event) => {
         this.g!.attr("transform", event.transform.toString());
@@ -194,7 +236,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     const positions = new Map<string, { x: number; y: number }>();
     this.g!.selectAll("[data-node-id]").each(function () {
-      const el = d3.select(this);
+      const el = select(this);
       const nodeId = el.attr("data-node-id");
       const realId = el.attr("data-real-id");
       const transform = el.attr("transform");
@@ -249,6 +291,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
   /**
    * Build a hierarchy tree from the ego-centered graph data.
+   * P7: Uses a cache keyed on site ID + filters + collapsed branches.
    * Structure:
    *   SITE (root)
    *   ├── Animation (branch)
@@ -260,6 +303,28 @@ export class GraphComponent implements OnChanges, OnDestroy {
    *           └── R2 targets...
    */
   private buildHierarchy(): HierarchyDatum {
+    if (!this.graphData) {
+      return { id: "", label: "", type: "SITE" };
+    }
+
+    // P7: Compute cache key from current state
+    const collapsedKey =
+      this.collapsedBranches.size > 0
+        ? [...this.collapsedBranches].sort().join(",")
+        : "";
+    const key = `${this.graphData.center.id}:${this.collapsedBranches.size}:${collapsedKey}`;
+
+    if (this.cachedHierarchy && this.cachedHierarchyKey === key) {
+      return this.cachedHierarchy;
+    }
+
+    const result = this.buildHierarchyImpl();
+    this.cachedHierarchy = result;
+    this.cachedHierarchyKey = key;
+    return result;
+  }
+
+  private buildHierarchyImpl(): HierarchyDatum {
     if (!this.graphData) {
       return { id: "", label: "", type: "SITE" };
     }
@@ -501,8 +566,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("data-node-id", (d) => d.id)
       .attr("cursor", "pointer")
       .call(
-        d3
-          .drag<SVGGElement, SimNode>()
+        drag<SVGGElement, SimNode>()
           .on("start", (event, d) => {
             if (!event.active) this.simulation?.alphaTarget(0.3).restart();
             d.fx = d.x;
@@ -583,27 +647,23 @@ export class GraphComponent implements OnChanges, OnDestroy {
       this.computeEdgePath(d, parallelCounts, targetRadius);
 
     // ── Force simulation ──
-    this.simulation = d3
-      .forceSimulation<SimNode>(simNodes)
+    this.simulation = forceSimulation<SimNode>(simNodes)
       .force(
         "link",
-        d3
-          .forceLink<SimNode, SimLink>(simLinks)
+        forceLink<SimNode, SimLink>(simLinks)
           .id((d) => d.id)
           .distance((d) => LINK_DISTANCE[d.edgeType] || 150),
       )
-      .force("charge", d3.forceManyBody().strength(-400))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(90).strength(0.8))
+      .force("charge", forceManyBody().strength(-400))
+      .force("center", forceCenter(width / 2, height / 2))
+      .force("collision", forceCollide().radius(90).strength(0.8))
       .force(
         "x",
-        d3
-          .forceX<SimNode>((d) => {
-            if (d.type === "R1") return width / 2 - 120;
-            if (d.type === "R2") return width / 2 + 120;
-            return width / 2;
-          })
-          .strength(0.08),
+        forceX<SimNode>((d) => {
+          if (d.type === "R1") return width / 2 - 120;
+          if (d.type === "R2") return width / 2 + 120;
+          return width / 2;
+        }).strength(0.08),
       );
 
     // Initial render
@@ -654,7 +714,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     // Build hierarchy
     const hierarchyData = this.buildHierarchy();
-    const root = d3.hierarchy(hierarchyData);
+    const root = hierarchy(hierarchyData);
 
     // Apply collapsed state to branch nodes
     root.each((node: any) => {
@@ -665,8 +725,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     });
 
     // Compute tree layout - horizontal orientation (left to right)
-    const treeLayout = d3
-      .tree<HierarchyDatum>()
+    const treeLayout = tree<HierarchyDatum>()
       .size([height - 80, width - 300])
       .separation((a, b) => (a.parent === b.parent ? 1 : 1.5));
 
@@ -823,7 +882,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const self = this;
     nodeGroups.each(function (d: any) {
       const data = d.data as HierarchyDatum;
-      const g = d3.select(this);
+      const g = select(this);
 
       // Branch nodes (Animation/Logistique/R1-Logistique/R2-Logistique labels)
       if (
@@ -1077,6 +1136,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
     simNodes.push(centerSimNode);
     simNodeMap.set(centerSimNode.id, centerSimNode);
 
+    // Build parent map for badge updates (needed before leaf node initialization)
+    const parentMap = new Map<string, string>();
+    root.links().forEach((link: any) => {
+      parentMap.set(link.target.data.id, link.source.data.id);
+    });
+
     // Leaf nodes (draggable) — use composite IDs from the tree hierarchy
     for (const compositeId of leafNodeIds) {
       const realId = compositeToRealId.get(compositeId)!;
@@ -1089,9 +1154,10 @@ export class GraphComponent implements OnChanges, OnDestroy {
         sigmpr: node.sigmpr,
       };
       const target = targetPositions.get(compositeId);
-      const saved =
-        this.savedPositions.get(compositeId) || this.savedPositions.get(realId);
-      const parentPos = parentPositions.get(compositeId);
+      const saved = this.savedPositions.get(compositeId);
+      const parentPos = parentMap.get(compositeId)
+        ? targetPositions.get(parentMap.get(compositeId)!)
+        : undefined;
       simNode.x = saved
         ? saved.x
         : parentPos
@@ -1109,12 +1175,6 @@ export class GraphComponent implements OnChanges, OnDestroy {
       simNodes.push(simNode);
       simNodeMap.set(simNode.id, simNode);
     }
-
-    // Build parent map for badge updates
-    const parentMap = new Map<string, string>();
-    root.links().forEach((link: any) => {
-      parentMap.set(link.target.data.id, link.source.data.id);
-    });
 
     // Position lookup: simulation nodes > target positions
     const getPosition = (id: string): { x: number; y: number } => {
@@ -1135,8 +1195,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const svgEl = this.svg!.node()!;
 
     leafNodeGroups.call(
-      d3
-        .drag<SVGGElement, any>()
+      drag<SVGGElement, any>()
         .container(svgEl)
         .on("start", (event: any, d: any) => {
           const sn = simNodeMap.get(d.data.id);
@@ -1148,7 +1207,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .on("drag", (event: any, d: any) => {
           const sn = simNodeMap.get(d.data.id);
           if (!sn) return;
-          const [mx, my] = d3.pointer(event, svgEl);
+          const [mx, my] = pointer(event, svgEl);
           sn.fx = mx;
           sn.fy = my;
         })
@@ -1162,27 +1221,22 @@ export class GraphComponent implements OnChanges, OnDestroy {
     );
 
     // Force simulation
-    this.simulation = d3
-      .forceSimulation<SimNode>(simNodes)
+    this.simulation = forceSimulation<SimNode>(simNodes)
       .force(
         "x",
-        d3
-          .forceX<SimNode>((d) => {
-            const t = targetPositions.get(d.id);
-            return t ? t.x : width / 2;
-          })
-          .strength(0.5),
+        forceX<SimNode>((d) => {
+          const t = targetPositions.get(d.id);
+          return t ? t.x : width / 2;
+        }).strength(0.5),
       )
       .force(
         "y",
-        d3
-          .forceY<SimNode>((d) => {
-            const t = targetPositions.get(d.id);
-            return t ? t.y : height / 2;
-          })
-          .strength(0.5),
+        forceY<SimNode>((d) => {
+          const t = targetPositions.get(d.id);
+          return t ? t.y : height / 2;
+        }).strength(0.5),
       )
-      .force("collide", d3.forceCollide().radius(30).strength(0.3))
+      .force("collide", forceCollide().radius(30).strength(0.3))
       .on("tick", () => {
         // Update node positions
         nodeGroups.attr("transform", (d: any) => {
@@ -1204,11 +1258,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
         // Update badge positions
         linkBadges.selectAll("g").attr("transform", function () {
-          const targetId = d3.select(this).attr("data-target-id");
-          if (!targetId) return d3.select(this).attr("transform");
+          const targetId = select(this).attr("data-target-id");
+          if (!targetId) return select(this).attr("transform");
           const tPos = getPosition(targetId);
           const sourceId = parentMap.get(targetId);
-          if (!sourceId) return d3.select(this).attr("transform");
+          if (!sourceId) return select(this).attr("transform");
           const sPos = getPosition(sourceId);
           const midX = (sPos.x + tPos.x) / 2;
           const midY = (sPos.y + tPos.y) / 2;
@@ -1244,7 +1298,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     // Build hierarchy
     const hierarchyData = this.buildHierarchy();
-    const root = d3.hierarchy(hierarchyData);
+    const root = hierarchy(hierarchyData);
 
     // Apply collapsed state to branch nodes
     root.each((node: any) => {
@@ -1256,8 +1310,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     // Compute cluster layout — vertical orientation (top to bottom)
     // cluster() aligns all leaves at the same depth
-    const clusterLayout = d3
-      .cluster<HierarchyDatum>()
+    const clusterLayout = cluster<HierarchyDatum>()
       .size([width - 300, height - 80])
       .separation((a, b) => (a.parent === b.parent ? 1 : 1.5));
 
@@ -1269,7 +1322,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const visibleIds = new Set(allNodes.map((d: any) => d.data.id));
 
     // Compute target positions for each node
-    // d3.cluster gives: d.x = horizontal spread, d.y = depth (0 = root)
+    // cluster gives: d.x = horizontal spread, d.y = depth (0 = root)
     // We want: root at bottom, leaves at top
     // So we flip vertically: y = height - d.y - offset
     const targetPositions = new Map<string, { x: number; y: number }>();
@@ -1418,7 +1471,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const self = this;
     nodeGroups.each(function (d: any) {
       const data = d.data as HierarchyDatum;
-      const g = d3.select(this);
+      const g = select(this);
 
       // Branch nodes (Animation/Logistique/R1-Logistique/R2-Logistique labels)
       if (
@@ -1727,8 +1780,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const svgEl = this.svg!.node()!;
 
     leafNodeGroups.call(
-      d3
-        .drag<SVGGElement, any>()
+      drag<SVGGElement, any>()
         .container(svgEl)
         .on("start", (event: any, d: any) => {
           const sn = simNodeMap.get(d.data.id);
@@ -1740,7 +1792,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .on("drag", (event: any, d: any) => {
           const sn = simNodeMap.get(d.data.id);
           if (!sn) return;
-          const [mx, my] = d3.pointer(event, svgEl);
+          const [mx, my] = pointer(event, svgEl);
           sn.fx = mx;
           sn.fy = my;
         })
@@ -1754,27 +1806,22 @@ export class GraphComponent implements OnChanges, OnDestroy {
     );
 
     // Force simulation
-    this.simulation = d3
-      .forceSimulation<SimNode>(simNodes)
+    this.simulation = forceSimulation<SimNode>(simNodes)
       .force(
         "x",
-        d3
-          .forceX<SimNode>((d) => {
-            const t = targetPositions.get(d.id);
-            return t ? t.x : width / 2;
-          })
-          .strength(0.5),
+        forceX<SimNode>((d) => {
+          const t = targetPositions.get(d.id);
+          return t ? t.x : width / 2;
+        }).strength(0.5),
       )
       .force(
         "y",
-        d3
-          .forceY<SimNode>((d) => {
-            const t = targetPositions.get(d.id);
-            return t ? t.y : height / 2;
-          })
-          .strength(0.5),
+        forceY<SimNode>((d) => {
+          const t = targetPositions.get(d.id);
+          return t ? t.y : height / 2;
+        }).strength(0.5),
       )
-      .force("collide", d3.forceCollide().radius(30).strength(0.3))
+      .force("collide", forceCollide().radius(30).strength(0.3))
       .on("tick", () => {
         // Update node positions
         nodeGroups.attr("transform", (d: any) => {
@@ -1796,11 +1843,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
         // Update badge positions
         linkBadges.selectAll("g").attr("transform", function () {
-          const targetId = d3.select(this).attr("data-target-id");
-          if (!targetId) return d3.select(this).attr("transform");
+          const targetId = select(this).attr("data-target-id");
+          if (!targetId) return select(this).attr("transform");
           const tPos = getPosition(targetId);
           const sourceId = parentMap.get(targetId);
-          if (!sourceId) return d3.select(this).attr("transform");
+          if (!sourceId) return select(this).attr("transform");
           const sPos = getPosition(sourceId);
           const midX = (sPos.x + tPos.x) / 2;
           const midY = (sPos.y + tPos.y) / 2;
@@ -1824,7 +1871,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
   // ═══════════════════════════════════════════════════════════════════
 
   private addArrowMarkers(
-    defs: d3.Selection<SVGDefsElement, unknown, null, undefined>,
+    defs: Selection<SVGDefsElement, unknown, null, undefined>,
   ): void {
     defs
       .append("marker")
@@ -1903,7 +1950,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
   }
 
   private drawNodeCircles(
-    selection: d3.Selection<SVGGElement, any, any, any>,
+    selection: Selection<SVGGElement, any, any, any>,
     isCenter: boolean,
     centerNode?: SimNode,
   ): void {
@@ -2007,7 +2054,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const textEl = sigmprTextEls.nodes()[i] as SVGTextElement;
         if (textEl) {
           const bbox = textEl.getBBox();
-          d3.select(this)
+          select(this)
             .selectAll("rect")
             .attr("x", bbox.x - 3)
             .attr("y", bbox.y - 1.5)
@@ -2161,7 +2208,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const animatedPaths = this.g
       .selectAll(".edges path, .tree-links path")
       .filter(function () {
-        return d3.select(this).classed("electric-current");
+        return select(this).classed("electric-current");
       });
 
     if (animatedPaths.empty()) return;
@@ -2175,16 +2222,26 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const period = this.ELECTRIC_DASH_PERIOD;
     const flowMs = this.ELECTRIC_FLOW_DURATION;
     const colorMs = this.ELECTRIC_COLOR_WAVE_DURATION;
-    const colorInterp = d3.interpolateRgb(COLOR_ELECTRIC, COLOR_TERTIARY);
 
-    this.selectionAnimTimer = d3.timer((elapsed) => {
+    // P8: Throttle to ~30 fps and use pre-computed color array
+    let lastTick = 0;
+    const frameMs = this.ANIM_FRAME_MS;
+    const colors = this.ELECTRIC_COLORS;
+    const colorCount = this.ELECTRIC_COLOR_COUNT;
+
+    this.selectionAnimTimer = timer((elapsed) => {
+      // Throttle: skip frames to maintain ~30 fps
+      if (elapsed - lastTick < frameMs) return;
+      lastTick = elapsed;
+
       // Dash flow: increasing dashoffset => dashes move from start (R3) to end (target)
       const dashOffset = ((elapsed / flowMs) * period) % period;
 
-      // Color wave: smooth oscillation Electric ↔ Tertiary
+      // Color wave: use pre-computed color array instead of interpolateRgb per frame
       const colorPhase = (elapsed % colorMs) / colorMs;
       const colorT = 0.5 - 0.5 * Math.cos(2 * Math.PI * colorPhase);
-      const color = colorInterp(colorT);
+      const colorIndex = Math.round(colorT * (colorCount - 1));
+      const color = colors[colorIndex];
 
       // Opacity wave: 1.0 ↔ 0.7 (brighter when Electric, dimmer when Tertiary)
       const strokeOpacity = 1 - 0.3 * colorT;
@@ -2237,7 +2294,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       // Reset link opacity AND stroke colors in a single transition per element
       // Also stop electric current animation
       g.selectAll(".edges path, .tree-links path").each(function () {
-        const el = d3.select(this);
+        const el = select(this);
         el.classed("electric-current", false);
         const edgeType = el.attr("data-edge-type");
         el.interrupt()
@@ -2252,7 +2309,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
       // Reset node colors to default with transition
       allNodes.each(function () {
-        const nodeGroup = d3.select(this);
+        const nodeGroup = select(this);
         const nodeId = nodeGroup.attr("data-node-id");
         if (!nodeId) return;
         const isCenter = nodeId === self.graphData!.center.id;
@@ -2270,7 +2327,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         if (nodeType) {
           const circles = nodeGroup.selectAll("circle");
           const innerCircle = circles.filter(function () {
-            const r = d3.select(this).attr("r");
+            const r = select(this).attr("r");
             return r === "30" || r === "22";
           });
 
@@ -2282,7 +2339,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
             .attr("stroke", NODE_STROKE_COLORS[nodeType]);
           circles
             .filter(function () {
-              const r = d3.select(this).attr("r");
+              const r = select(this).attr("r");
               return r === "34" || r === "26";
             })
             .interrupt()
@@ -2327,7 +2384,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
       // Reset edge labels to default colors with transition
       g.selectAll(".edge-labels g").each(function () {
-        const el = d3.select(this);
+        const el = select(this);
         const edgeType = el.attr("data-edge-type");
         const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
         el.select("rect:first-of-type")
@@ -2351,7 +2408,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
       // Reset tree link badges to default colors with transition
       g.selectAll(".link-badges g").each(function () {
-        const badgeG = d3.select(this);
+        const badgeG = select(this);
         const edgeType = badgeG.attr("data-edge-type");
         const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
         badgeG
@@ -2398,7 +2455,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     if (this.layoutMode === "tree" || this.layoutMode === "dendrogram") {
       // Hierarchy modes: highlight ancestors + descendants
       const hierarchyData = this.buildHierarchy();
-      const root = d3.hierarchy(hierarchyData);
+      const root = hierarchy(hierarchyData);
 
       // Apply collapsed state
       root.each((node: any) => {
@@ -2468,12 +2525,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .transition()
         .duration(t)
         .attr("opacity", function () {
-          const nodeId = d3.select(this).attr("data-node-id");
+          const nodeId = select(this).attr("data-node-id");
           return nodeId && highlighted.has(nodeId) ? 1 : 0.25;
         });
 
       g.selectAll(".tree-links path").each(function () {
-        const el = d3.select(this);
+        const el = select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
         const connected =
@@ -2501,7 +2558,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       });
 
       g.selectAll(".link-badges g").each(function () {
-        const badgeG = d3.select(this);
+        const badgeG = select(this);
         const targetId = badgeG.attr("data-target-id");
         const connected = targetId && highlighted.has(targetId);
         // Only highlight badges whose target is a leaf in the selected path
@@ -2575,12 +2632,12 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .transition()
         .duration(t)
         .attr("opacity", function () {
-          const nodeId = d3.select(this).attr("data-node-id");
+          const nodeId = select(this).attr("data-node-id");
           return nodeId && connectedNodeIds.has(nodeId) ? 1 : 0.25;
         });
 
       g.selectAll(".edges path").each(function () {
-        const el = d3.select(this);
+        const el = select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
         const connected = isConnected(sourceId, targetId);
@@ -2604,7 +2661,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       });
 
       g.selectAll(".edge-labels g").each(function () {
-        const el = d3.select(this);
+        const el = select(this);
         const sourceId = el.attr("data-source-id");
         const targetId = el.attr("data-target-id");
         const connected = isConnected(sourceId, targetId);
@@ -2658,7 +2715,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     // Change colors of selected node to Electric colors with transition
     allNodes.each(function () {
-      const nodeGroup = d3.select(this);
+      const nodeGroup = select(this);
       const nodeId = nodeGroup.attr("data-node-id");
       if (!nodeId) return;
 
@@ -2733,7 +2790,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       // Find the inner circle (r = NODE_RADIUS)
       const circles = nodeGroup.selectAll("circle");
       const innerCircle = circles.filter(function () {
-        const r = d3.select(this).attr("r");
+        const r = select(this).attr("r");
         return r === "30" || r === "22";
       });
 
@@ -2748,7 +2805,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         // Also update outer circle with transition
         circles
           .filter(function () {
-            const r = d3.select(this).attr("r");
+            const r = select(this).attr("r");
             return r === "34" || r === "26";
           })
           .interrupt()
@@ -2770,7 +2827,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
             .attr("stroke", NODE_STROKE_COLORS[nodeType]);
           circles
             .filter(function () {
-              const r = d3.select(this).attr("r");
+              const r = select(this).attr("r");
               return r === "34" || r === "26";
             })
             .interrupt()
@@ -2969,7 +3026,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
           badgeGroup
             .selectAll("g")
             .attr("opacity", function (this: SVGGElement) {
-              const targetId = d3.select(this).attr("data-target-id");
+              const targetId = select(this).attr("data-target-id");
               return targetId && highlighted.has(targetId) ? 1 : 0.12;
             });
         }
@@ -3147,7 +3204,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
   }
 
   private updateEdgeLabelsForce(
-    edgeLabels: d3.Selection<SVGGElement, SimLink, SVGGElement, unknown>,
+    edgeLabels: Selection<SVGGElement, SimLink, SVGGElement, unknown>,
     simLinks: SimLink[],
     parallelCounts: Map<string, number>,
   ): void {
@@ -3176,7 +3233,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const mx = (sx + tx) / 2 + px * parallelOffset;
       const my = (sy + ty) / 2 + py * parallelOffset;
 
-      const el = d3.select(this);
+      const el = select(this);
       const textEl = el
         .select("text:not(.label-dmsid)")
         .node() as SVGTextElement;
@@ -3229,9 +3286,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
   }
 
   private setupAutoZoomAndResize(
-    svg: d3.Selection<SVGSVGElement, unknown, null, undefined>,
-    g: d3.Selection<SVGGElement, unknown, null, undefined>,
-    zoom: d3.ZoomBehavior<SVGSVGElement, unknown>,
+    svg: Selection<SVGSVGElement, unknown, null, undefined>,
+    g: Selection<SVGGElement, unknown, null, undefined>,
+    zoom: ZoomBehavior<SVGSVGElement, unknown>,
     containerEl: HTMLDivElement,
     centerNode: SimNode | null,
     useSimulationEnd: boolean,
@@ -3252,7 +3309,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         .duration(500)
         .call(
           zoom.transform,
-          d3.zoomIdentity
+          zoomIdentity
             .translate(fullWidth / 2, fullHeight / 2)
             .scale(clampedScale)
             .translate(-bmidX, -bmidY),
@@ -3290,7 +3347,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
           .duration(300)
           .call(
             zoom.transform,
-            d3.zoomIdentity
+            zoomIdentity
               .translate(w / 2, h / 2)
               .scale(clamped)
               .translate(-bmidX, -bmidY),

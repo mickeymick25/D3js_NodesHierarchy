@@ -1,0 +1,593 @@
+# Plan de Refactoring — Performance COP Links Visualization
+
+**Date :** 2026-05-26
+**Fichier :** `Doc/2026_05_26_Refactoring_Performance.md`
+**KPI :** Performance, rapidité d'affichage, efficacité du traitement des données
+**Objectif qualité :** 🏆 Platinium — Chaque priorité du plan doit être réalisée au niveau de qualité Platinium : code production-ready, zéro dette technique résiduelle, tests validés, documentation à jour.
+
+---
+
+## 1. Diagnostic — État des lieux
+
+### 1.1 Métriques brutes
+
+| Fichier | Lignes | Rôle |
+|---|---|---|
+| `graph.component.ts` | **3 316** | Rendu SVG, 3 layouts, interactions, animations, sélection |
+| `renderForceLayout()` | 249 | Layout force-directed |
+| `renderTreeLayout()` | 591 | Layout arborescence |
+| `renderDendrogramLayout()` | 593 | Layout dendrogramme |
+| `applyNodeSelection()` | ~570 | Sélection + transitions + effet électrique |
+| Autres fichiers | < 100 chacun | OK |
+
+### 1.2 Problèmes identifiés par impact
+
+| # | Problème | Catégorie | Sévérité |
+|---|---|---|---|
+| 1 | `import * as d3` — bundle ~500 KB | Bundle size | 🔴 Critique |
+| 2 | Composant monolithe 3 316 lignes | Architecture | 🔴 Critique |
+| 3 | Duplication ~80% entre Tree et Dendrogram | Code mort / duplication | 🔴 Critique |
+| 4 | Reconstruction DOM totale à chaque rendu | Rendu SVG | 🟠 Élevé |
+| 5 | `applyNodeSelection()` 570 lignes de DOM queries | Interactions | 🟠 Élevé |
+| 6 | `d3.timer()` à 60 fps continu | Animations | 🟠 Élevé |
+| 7 | `getBBox()` synchrone ~100 appels par rendu | Rendu SVG | 🟡 Modéré |
+| 8 | `searchBySigmpr()` recherche linéaire O(n×m) | Traitement données | 🟡 Modéré |
+| 9 | Pas de `ChangeDetectionStrategy.OnPush` | Change detection | 🟡 Modéré |
+| 10 | `buildHierarchy()` appelé 2-3 fois par cycle | CPU | 🟢 Faible |
+
+### 1.3 Gains estimés globaux
+
+| Métrique | Avant | Après P1-P3 | Après P1-P10 |
+|---|---|---|---|
+| **Bundle JS** (D3 seul) | ~500 KB | ~100-120 KB | ~100-120 KB |
+| **Temps rendu initial** (50 liens) | ~200 ms | ~120 ms | **~80 ms** |
+| **Temps changement filtre** | Recréation totale | Incrémental -60% | **-80%** |
+| **CPU hover/sélection** | 570 lignes DOM queries | Références directes | **CSS transitions → 0 JS/frame** |
+| **CPU animation électrique** | 60 fps, interpolateRgb/frame | 30 fps, couleurs pré-calculées | **-50%** |
+| **Lignes graph.component.ts** | 3 316 | ~1 500 | **~800** |
+
+---
+
+## 2. Plan d'action priorisé
+
+### P1 — Imports D3 sélectifs ✅ TERMINÉ
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🔴 Critique |
+| **Effort** | Faible |
+| **Impact** | Bundle -400 KB |
+| **Fichier** | `graph.component.ts` |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-26 |
+
+**Problème :** `import * as d3 from "d3"` importe la totalité de D3 v7 (~500 KB non gzippé). Le composant n'utilise qu'une fraction des modules.
+
+**Solution implémentée :** Remplacement par des imports sélectifs : 
+
+```typescript
+import "d3-transition"; // side-effect: patches Selection prototype with .transition()
+import { forceSimulation, forceLink, forceManyBody, forceCenter,
+  forceCollide, forceX, forceY,
+  type SimulationNodeDatum, type SimulationLinkDatum, type Simulation
+} from "d3-force";
+import { hierarchy, tree, cluster } from "d3-hierarchy";
+import { select, pointer, type Selection } from "d3-selection";
+import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
+import { drag } from "d3-drag";
+import { timer, type Timer } from "d3-timer";
+import { interpolateRgb } from "d3-interpolate";
+```
+
+**Points notables :**
+- `d3-transition` importé en side-effect (patch le prototype de `Selection` avec `.transition()`)
+- Types importés via `type` : `SimulationNodeDatum`, `SimulationLinkDatum`, `Simulation`, `Selection`, `ZoomBehavior`, `Timer`
+- `pointer` importé depuis `d3-selection` (était `d3.pointer`)
+- Toutes les références `d3.*` dans le corps du composant remplacées par les noms directs
+- Bug corrigé : `parentMap` utilisé avant sa déclaration dans `renderTreeLayout()` — déplacé avant la boucle
+
+**Résultat :** Bundle `main.js` = **123.75 kB** (compilation OK, 0 erreurs)
+
+---
+
+### P2 — Découpage du composant monolithe
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🔴 Critique |
+| **Effort** | Élevé |
+| **Impact** | Chargement initial, maintenabilité, suppression duplication |
+| **Fichiers** | Nouveaux services + refactor de `graph.component.ts` |
+| **Statut** | ⬜ Non commencé |
+
+**Problème :** Un composant de 3 316 lignes gère tout : 3 layouts, interactions, animations, sélection, tooltips, badges, markers SVG, auto-zoom.
+
+**Architecture cible :**
+
+```
+src/app/
+├── services/
+│   ├── graph.service.ts              (existant)
+│   ├── layout/
+│   │   ├── hierarchy-layout.service.ts   → Code partagé Tree/Dendrogram
+│   │   ├── force-layout.service.ts        → Layout force spécifique
+│   │   ├── tree-layout.service.ts         → Mapping axes Tree
+│   │   └── dendrogram-layout.service.ts   → Mapping axes Dendrogramme
+│   ├── selection.service.ts              → applyNodeSelection + electric anim
+│   └── svg-builder.service.ts            → Markers, defs, zoom, resize
+├── components/
+│   ├── graph/
+│   │   ├── graph.component.ts            → Orchestrateur ~150 lignes
+│   │   └── graph.component.html
+│   └── ...
+```
+
+| Module estimé | Lignes | Responsabilité |
+|---|---|---|
+| `GraphComponent` | ~150 | Orchestration, ngOnChanges, lifecycle |
+| `HierarchyLayoutService` | ~300 | Code partagé Tree/Dendrogram (badges, nœuds, hover, drag, collapse) |
+| `ForceLayoutService` | ~250 | Force layout spécifique |
+| `TreeLayoutService` | ~100 | Mapping axes Tree |
+| `DendrogramLayoutService` | ~100 | Mapping axes Dendrogramme |
+| `SelectionService` | ~250 | Sélection + transitions + animation électrique |
+| `SvgBuilderService` | ~80 | Markers, defs, zoom, resize |
+
+**Dépendances :** P1 (imports sélectifs) facilite le découpage.
+
+---
+
+### P3 — Enter/Update/Exit D3 (rendu incrémental)
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟠 Élevé |
+| **Effort** | Moyen |
+| **Impact** | Rendu incrémental -60% sur changements partiels |
+| **Fichier** | `graph.component.ts` → services |
+| **Statut** | ⬜ Non commencé |
+
+**Problème :** `this.g!.selectAll("*").remove()` détruit et recrée tout le DOM SVG à chaque rendu. Pour 50+ nœuds et liens, cela signifie des centaines de créations/insertions DOM.
+
+**Solution :** Pattern Enter/Update/Exit de D3 :
+
+```typescript
+// Au lieu de tout détruire et recréer :
+const nodeGroups = g.selectAll("[data-node-id]")
+  .data(nodes, d => d.id);
+
+nodeGroups.exit().transition().duration(300).remove();  // Exit
+const entering = nodeGroups.enter().append("g")...;      // Enter
+entering.merge(nodeGroups)                                // Update
+  .transition().duration(300)
+  .attr("transform", d => `translate(${d.x},${d.y})`);
+```
+
+**Cas d'usage concrets :**
+- Toggle filtre Animation/Logistique : seuls les nœuds/liens affectés changent
+- Changement de site : exit/enter complet (comportement actuel)
+- Collapse/Expand en arborescence : enter/exit partiel
+
+**Dépendances :** P2 (le pattern Enter/Update/Exit est plus facile à implémenter dans les services dédiés).
+
+---
+
+### P4 — Références directes vs DOM queries
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟠 Élevé |
+| **Effort** | Moyen |
+| **Impact** | Hover/sélection -40% CPU |
+| **Fichier** | `graph.component.ts` → `SelectionService` |
+| **Statut** | ⬜ Non commencé |
+
+**Problème :** `applyNodeSelection()` (570 lignes) utilise des sélecteurs DOM pour identifier les éléments :
+
+```typescript
+// Requêtes coûteuses répétées
+g.selectAll("[data-node-id]")
+g.selectAll(".edges path, .tree-links path")
+g.selectAll(".link-badges g, .edge-labels g")
+const r = d3.select(this).attr("r");  // Identification par rayon de cercle !
+```
+
+**Solution :** Maintenir des Maps de références :
+
+```typescript
+private nodeGroupMap = new Map<string, d3.Selection<SVGGElement, any, any, any>>();
+private edgePathMap = new Map<string, d3.Selection<SVGPathElement, any, any, any>>();
+private badgeGroupMap = new Map<string, d3.Selection<SVGGElement, any, any, any>>();
+```
+
+Accès O(1) au lieu de traversées DOM :
+
+```typescript
+// Avant : O(n) DOM query
+g.selectAll("[data-node-id]").each(function() { ... });
+
+// Après : O(1) Map lookup
+const nodeGroup = this.nodeGroupMap.get(selectedId);
+nodeGroup.select("circle.inner").attr("fill", COLOR_ELECTRIC_CONTAINER);
+```
+
+**Dépendances :** P2 (les Maps seront dans les services dédiés).
+
+---
+
+### P5 — Transitions CSS au lieu de D3 transitions inline
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟠 Élevé |
+| **Effort** | Moyen |
+| **Impact** | Hover 0 JS/frame, suppression ~300 lignes |
+| **Fichiers** | `graph.component.ts` → `SelectionService`, `graph.component.scss` |
+| **Statut** | ⬜ Non commencé |
+
+**Problème :** Toutes les transitions de sélection/hover sont gérées par des `.interrupt().transition().duration(t).attr()` D3 inline, ce qui coûte du JS par frame et représente ~300 lignes de code.
+
+**Solution :** Remplacer par des classes CSS + `transition` natif :
+
+```scss
+// graph.component.scss
+.graph-node { transition: opacity 250ms ease, fill 250ms ease, stroke 250ms ease; }
+.graph-node.dimmed { opacity: 0.25; }
+.graph-node.selected .inner-circle { fill: var(--electric-container); stroke: var(--electric); }
+.graph-link { transition: opacity 250ms ease, stroke 250ms ease; }
+.graph-link.dimmed { opacity: 0.25; }
+.graph-link.electric { stroke-dasharray: 10 4 4 4; filter: url(#electric-glow); }
+```
+
+```typescript
+// Avant : 570 lignes de transitions D3 inline
+el.interrupt().transition().duration(t).attr("opacity", 0.25).attr("stroke", color);
+
+// Après : toggle de classe CSS
+nodeGroup.classed("dimmed", !isConnected).classed("selected", isSelected);
+```
+
+**Limites :** L'animation électrique (dash flow + oscillation couleur) doit rester en JS car elle est continue et dynamique. Seules les transitions d'état (sélection/désélection/hover) passent en CSS.
+
+**Dépendances :** P4 (les références directes facilitent le toggle de classes).
+
+---
+
+### P6 — Extraction HierarchyLayoutService (suppression duplication)
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟠 Élevé |
+| **Effort** | Moyen |
+| **Impact** | Suppression ~500 lignes de duplication |
+| **Fichiers** | Nouveau `hierarchy-layout.service.ts` |
+| **Statut** | ⬜ Non commencé |
+
+**Problème :** `renderTreeLayout()` (591 lignes) et `renderDendrogramLayout()` (593 lignes) partagent ~80% de code identique : badges, nœuds, tags SIGMPR, hover, drag, collapse/expand, simulation D3, sélection.
+
+**Code dupliqué identique :**
+- Rendu des badges de liens (A/DMS/L) — ~40 lignes × 2
+- Rendu des nœuds (branches, centre, feuilles R1/R2) — ~120 lignes × 2
+- Tags SIGMPR sur les nœuds R1 — ~30 lignes × 2
+- Hover interactions (`addHierarchyHoverInteractions`) — ~170 lignes × 2 (appelé dans les 2 layouts)
+- Drag des nœuds feuilles — ~40 lignes × 2
+- Simulation D3 (forceX/forceY/collide) — ~50 lignes × 2
+- Auto-zoom et resize — ~10 lignes × 2
+- Sélection par clic — ~15 lignes × 2
+
+**Code spécifique à chaque layout :**
+- Mapping des axes (x/y vs inversé) — ~10 lignes × 2
+- Courbes de liens (bézier horizontal vs vertical) — ~5 lignes × 2
+- Positionnement des labels (droite vs dessous) — ~5 lignes × 2
+- Indicateur collapse (droite vs dessous) — ~5 lignes × 2
+
+**Solution :** Créer un `HierarchyLayoutService` avec les méthodes partagées paramétrées :
+
+```typescript
+interface HierarchyConfig {
+  layout: "tree" | "dendrogram";
+  xMapping: (d: any) => number;  // tree: d.y + 150, dendrogram: d.x + 150
+  yMapping: (d: any) => number;  // tree: d.x + 40, dendrogram: height - d.y - 40
+  linkCurve: (sx: number, sy: number, tx: number, ty: number) => string;
+  labelPosition: "right" | "bottom";
+  indicatorPosition: "right" | "bottom";
+}
+```
+
+**Dépendances :** P2 (le découpage est un prérequis).
+
+---
+
+### P7 — Cache buildHierarchy ✅ TERMINÉ
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟢 Faible |
+| **Effort** | Faible |
+| **Impact** | CPU -1 appel rebuild par cycle |
+| **Fichier** | `graph.component.ts` |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-26 |
+
+**Problème :** `buildHierarchy()` est appelé dans `renderTreeLayout()`, `renderDendrogramLayout()`, et dans `applyNodeSelection()` pour les modes tree/dendrogramme. Chaque appel reconstruisait la hiérarchie à partir des mêmes données.
+
+**Solution implémentée :** Cache avec invalidation automatique :
+
+```typescript
+private cachedHierarchy: HierarchyDatum | null = null;
+private cachedHierarchyKey: string | null = null;
+
+private buildHierarchy(): HierarchyDatum {
+  if (!this.graphData) {
+    return { id: "", label: "", type: "SITE" };
+  }
+  // Clé de cache incluant le site et l'état des branches collapsées
+  const collapsedKey = this.collapsedBranches.size > 0
+    ? [...this.collapsedBranches].sort().join(',') : "";
+  const key = `${this.graphData.center.id}:${this.collapsedBranches.size}:${collapsedKey}`;
+  if (this.cachedHierarchy && this.cachedHierarchyKey === key) {
+    return this.cachedHierarchy;
+  }
+  const result = this.buildHierarchyImpl();
+  this.cachedHierarchy = result;
+  this.cachedHierarchyKey = key;
+  return result;
+}
+```
+
+**Points notables :**
+- L'ancienne méthode `buildHierarchy()` renommée en `buildHierarchyImpl()` (logique métier inchangée)
+- `buildHierarchy()` est désormais le wrapper avec cache
+- La clé de cache inclut `siteId + collapsedBranches.size + sortedCollapsedIds` → invalidation automatique quand le site change ou qu'on collapse/expand
+- Cache explicitement invalidé dans `ngOnChanges` quand `graphData` change (`this.cachedHierarchy = null`)
+- La logique de build n'est jamais appelée si le cache est valide
+
+**Dépendances :** Aucune.
+
+---
+
+### P8 — OnPush + optimisation d3.timer ✅ TERMINÉ
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟡 Modéré |
+| **Effort** | Faible |
+| **Impact** | CPU -50% animation, CD -20% |
+| **Fichiers** | `graph.component.ts` |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-26 |
+
+#### 8a. ChangeDetectionStrategy.OnPush ✅
+
+```typescript
+@Component({
+  // ...
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+```
+
+Ajout de `ChangeDetectorRef` injecté via le constructeur et appel de `this.cdr.markForCheck()` dans `ngOnChanges()` quand les `@Input` changent.
+
+#### 8b. d3.timer à 30 fps + couleurs pré-calculées ✅
+
+```typescript
+// Pré-calcul des 30 couleurs Electric ↔ Tertiary (au lieu de interpolateRgb à chaque frame)
+private readonly ELECTRIC_COLORS: string[] = Array.from(
+  { length: 30 },
+  (_, i) => {
+    const colorT = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / 30);
+    return interpolateRgb(COLOR_ELECTRIC, COLOR_TERTIARY)(colorT);
+  },
+);
+private readonly ELECTRIC_COLOR_COUNT = this.ELECTRIC_COLORS.length;
+private readonly ANIM_FRAME_MS = 1000 / 30; // ~30 fps
+
+// Dans startElectricAnimation() :
+let lastTick = 0;
+const frameMs = this.ANIM_FRAME_MS;
+const colors = this.ELECTRIC_COLORS;
+const colorCount = this.ELECTRIC_COLOR_COUNT;
+
+this.selectionAnimTimer = timer((elapsed) => {
+  if (elapsed - lastTick < frameMs) return; // Throttle 30 fps
+  lastTick = elapsed;
+  // ...
+  const colorIndex = Math.round(colorT * (colorCount - 1));
+  const color = colors[colorIndex]; // Lookup O(1) au lieu de interpolateRgb
+  // ...
+});
+```
+
+**Points notables :**
+- `interpolateRgb` n'est plus appelée à chaque frame — remplacée par un lookup dans un tableau pré-calculé de 30 couleurs
+- Le timer est throttled à ~30 fps (33 ms entre chaque frame) au lieu de 60 fps
+- L'ancien attribut `colorInterp` remplacé par `colors[colorIndex]`
+- Les constantes `ELECTRIC_COLORS`, `ELECTRIC_COLOR_COUNT`, `ANIM_FRAME_MS` sont `readonly` et pré-calculées au niveau de la classe
+
+**Dépendances :** Aucune.
+
+---
+
+### P9 — Index searchBySigmpr ✅ TERMINÉ
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟡 Modéré |
+| **Effort** | Faible |
+| **Impact** | Recherche O(k) au lieu de O(n×m) |
+| **Fichier** | `graph.service.ts` |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-26 |
+
+**Problème :** `searchBySigmpr()` faisait 2 filtres + 2 `find` linéaires à chaque frappe. `getAllSites()` recréait un filtre à chaque appel.
+
+**Solution implémentée :** 5 index Maps pré-construits au constructeur :
+
+```typescript
+private r1BySigmpr = new Map<string, Node>();
+private edgeByTargetAnim = new Map<string, Edge>();
+private edgesByTargetLogistics = new Map<string, Edge[]>();
+private siteById = new Map<string, Node>();
+private nodeById = new Map<string, Node>();
+private allSites: Node[];
+```
+
+**searchBySigmpr()** : itération sur `r1BySigmpr` (Map) au lieu de `allNodes.filter()`, lookups O(1) via `edgeByTargetAnim` et `siteById` au lieu de `allEdges.find()` + `allNodes.find()`.
+
+**getAllSites()** : retourne `this.allSites` pré-calculé au lieu de `this.allNodes.filter()`.
+
+**rebuildGraph()** : `this.siteById.get(siteId)` au lieu de `this.allNodes.find()`.
+
+**Points notables :**
+- `Edge` ajouté aux imports depuis `graph.model.ts`
+- Index `edgesByTargetLogistics` (Map<string, Edge[]>) pour le fallback LOGISTICS — O(1) au lieu de O(n)
+- Les résultats sans site parent sont filtrés en sortie (comportement identique à l'original)
+
+**Dépendances :** Aucune.
+
+---
+
+### P10 — Pré-calcul badges getBBox
+
+| Champ | Détail |
+|---|---|
+| **Priorité** | 🟢 Faible |
+| **Effort** | Faible |
+| **Impact** | Rendu initial -30-40% |
+| **Fichiers** | `graph.component.ts` → services |
+| **Statut** | ⬜ Non commencé |
+
+**Problème :** `getBBox()` force un layout synchrone du navigateur. Appelé ~100 fois pour un site avec 50 liens.
+
+**Solution 1 — Pré-calculer les largeurs de badges :**
+
+```typescript
+// Les badges "A" et "L" ont une largeur constante
+// Les badges "DMS:xxxxxx" ont une largeur prédictible ≈ 7px × len + 8px padding
+private computeBadgeWidth(text: string): number {
+  return text.length * 7 + 8;
+}
+private computeBadgeHeight(): number {
+  return 14; // hauteur fixe
+}
+```
+
+**Solution 2 — Batcher les lectures getBBox :**
+
+Regrouper tous les `append("text")` en premier, puis un seul cycle de lecture `getBBox()`, puis appliquer les `rect` en batch :
+
+```typescript
+// Avant : interleave append + getBBox (force N layouts)
+texts.forEach(t => {
+  const el = g.append("text").text(t);
+  const bbox = el.node().getBBox();
+  g.append("rect").attr("width", bbox.width + 8);
+});
+
+// Après : batch append, puis batch getBBox, puis batch rect
+const textEls = texts.map(t => g.append("text").text(t));
+const bboxes = textEls.map(el => (el.node() as SVGTextElement).getBBox()); // 1 seul layout
+textEls.forEach((el, i) => { /* utiliser bboxes[i] */ });
+```
+
+**Dépendances :** P2 (plus facile à implémenter dans les services dédiés).
+
+---
+
+## 3. Suivi d'avancement
+
+| # | Priorité | Action | Statut | Commit | Date | Notes |
+|---|---|---|---|---|---|---|
+| P1 | 🔴 Critique | Imports D3 sélectifs | ✅ Terminé | — | 2026-05-26 | Bundle main.js : 123.75 kB |
+| P2 | 🔴 Critique | Découpage composant monolithe | ⬜ Non commencé | — | — | Dépend de P1 |
+| P3 | 🟠 Élevé | Enter/Update/Exit D3 | ⬜ Non commencé | — | — | Dépend de P2 |
+| P4 | 🟠 Élevé | Références directes vs DOM queries | ⬜ Non commencé | — | — | Dépend de P2 |
+| P5 | 🟠 Élevé | Transitions CSS vs D3 inline | ⬜ Non commencé | — | — | Dépend de P4 |
+| P6 | 🟠 Élevé | Extraction HierarchyLayoutService | ⬜ Non commencé | — | — | Dépend de P2 |
+| P7 | 🟢 Faible | Cache buildHierarchy | ✅ Terminé | — | 2026-05-26 | Clé = siteId:collapsedCount:collapsedIds |
+| P8 | 🟡 Modéré | OnPush + d3.timer 30fps | ✅ Terminé | — | 2026-05-26 | ChangeDetectionStrategy.OnPush + markForCheck + 30fps throttle + couleurs pré-calculées |
+| P9 | 🟡 Modéré | Index searchBySigmpr | ✅ Terminé | — | 2026-05-26 | O(k) lookups via Maps |
+| P10 | 🟢 Faible | Pré-calcul badges getBBox | ⬜ Non commencé | — | — | Dépend de P2 |
+
+### Légende des statuts
+
+- ⬜ Non commencé
+- 🔄 En cours
+- ✅ Terminé
+- ❌ Annulé / reporté
+
+---
+
+## 4. Ordre d'exécution recommandé
+
+```mermaid
+graph TD
+    P1[P1 - Imports D3 sélectifs] --> P8[P8 - OnPush + d3.timer 30fps]
+    P1 --> P9[P9 - Index searchBySigmpr]
+    P1 --> P7[P7 - Cache buildHierarchy]
+    P1 --> P2[P2 - Découpage monolithe]
+    P2 --> P6[P6 - HierarchyLayoutService]
+    P2 --> P4[P4 - Références directes]
+    P4 --> P5[P5 - Transitions CSS]
+    P2 --> P3[P3 - Enter/Update/Exit]
+    P2 --> P10[P10 - Pré-calcul badges]
+
+    style P1 fill:#ff6b6b,color:#fff
+    style P2 fill:#ff6b6b,color:#fff
+    style P3 fill:#ffa94d,color:#fff
+    style P4 fill:#ffa94d,color:#fff
+    style P5 fill:#ffa94d,color:#fff
+    style P6 fill:#ffa94d,color:#fff
+    style P7 fill:#8ce99a,color:#000
+    style P8 fill:#ffe066,color:#000
+    style P9 fill:#ffe066,color:#000
+    style P10 fill:#8ce99a,color:#000
+```
+
+**Phase 1 — Quick wins (indépendants) :** P1, P7, P8, P9 — peuvent être faits en parallèle, sans risque de régression.
+
+**Phase 2 — Architecture :** P2, P6 — réécriture majeure, suppression de la duplication.
+
+**Phase 3 — Optimisations rendu :** P3, P4, P5, P10 — dépendent de la nouvelle architecture.
+
+---
+
+## 5. Niveau de qualité visé : Platinium
+
+Ce plan de refactoring vise le **niveau de qualité Platinium**. Cela signifie que chaque priorité (P1 à P10) doit respecter les critères suivants avant d'être marquée ✅ :
+
+| Critère Platinium | Description |
+|---|---|
+| **Code production-ready** | Aucun `any`, aucun `eslint-disable`, aucun TODO ou FIXME résiduel. Typage strict sur toutes les méthodes publiques et privées. |
+| **Zéro régression visuelle** | Les 3 modes (Force, Arborescence, Dendrogramme) doivent être testés visuellement après chaque étape. Toute régression bloque la priorité suivante. |
+| **Zéro dette technique résiduelle** | Pas de code mort laissé en commentaire, pas de duplication résiduelle entre les layouts. Si un pattern obsolète est remplacé, il doit être entièrement supprimé. |
+| **Performance mesurée** | Chaque optimisation doit être validée par une métrique avant/après (bundle size, temps de rendu, temps de recherche). Les mesures sont consignées dans le tableau de suivi. |
+| **Documentation à jour** | Le journal des modifications (`Doc/`) est mis à jour à chaque priorité terminée. Les interfaces et services publics sont documentés (JSDoc). |
+| **Tests** | Les cas critiques sont couverts : rendu des 3 layouts, sélection R1/R2 avec effet électrique, recherche SIGMPR, collapse/expand, transitions entre modes. |
+
+### Barème de validation par priorité
+
+| Priorité | Métrique Platinium | Seuil de réussite |
+|---|---|---|
+| P1 | Bundle size D3 | < 150 KB (non gzippé) |
+| P2 | Lignes `graph.component.ts` | < 800 lignes |
+| P3 | Temps de changement filtre | < 50 ms (vs ~200 ms avant) |
+| P4 | Temps hover/sélection | < 16 ms (1 frame) |
+| P5 | Temps JS hover | 0 ms/frame (CSS transitions) |
+| P6 | Lignes dupliquées Tree/Dendrogram | 0 |
+| P7 | Appels `buildHierarchy()` par cycle | 1 |
+| P8 | FPS animation électrique | ≤ 30 fps, CPU < 5% |
+| P9 | Temps recherche SIGMPR | < 1 ms |
+| P10 | Appels `getBBox()` par rendu | 0 (pré-calcul) |
+
+---
+
+## 6. Risques et points d'attention
+
+| Risque | Mitigation |
+|---|---|
+| Régression visuelle lors du découpage (P2) | Tests visuels manuels sur les 3 modes avant/après chaque étape |
+| D3 imports sélectifs peuvent ne pas tree-shaker correctement | Vérifier le bundle final avec `ng build --stats-json` + webpack-bundle-analyzer |
+| Enter/Update/Exit (P3) complexifie la gestion du state D3 | Conserver le pattern `selectAll("*").remove()` comme fallback, migrer progressivement |
+| Transitions CSS (P5) ne supportent pas `stroke-dasharray` animé | Garder l'animation électrique en JS, ne migrer que les transitions d'état |
+| Le cache `buildHierarchy` (P7) doit être invalidé au collapse/expand | Inclure `collapsedBranches` dans la clé de cache |
+| `ChangeDetectionStrategy.OnPush` (P8) nécessite des `markForCheck()` explicites | Tester exhaustivement les changements d'Input et les événements asynchrones |

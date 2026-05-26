@@ -2,6 +2,7 @@ import { Injectable } from "@angular/core";
 import { BehaviorSubject, Observable } from "rxjs";
 import {
   Node,
+  Edge,
   GraphData,
   EdgeType,
   LayoutMode,
@@ -21,6 +22,14 @@ export class GraphService {
   private allNodes = MOCK_NODES;
   private allEdges = MOCK_EDGES;
 
+  /** Index maps for O(1) lookups */
+  private r1BySigmpr = new Map<string, Node>();
+  private edgeByTargetAnim = new Map<string, Edge>();
+  private edgesByTargetLogistics = new Map<string, Edge[]>();
+  private siteById = new Map<string, Node>();
+  private nodeById = new Map<string, Node>();
+  private allSites: Node[];
+
   private selectedSiteId$ = new BehaviorSubject<string>("site-1");
   private graphData$ = new BehaviorSubject<GraphData | null>(null);
   private filters$ = new BehaviorSubject<EdgeFilters>({
@@ -30,6 +39,24 @@ export class GraphService {
   private layoutMode$ = new BehaviorSubject<LayoutMode>(DEFAULT_LAYOUT_MODE);
 
   constructor() {
+    this.allSites = this.allNodes.filter((n) => n.type === "SITE");
+
+    for (const n of this.allNodes) {
+      this.nodeById.set(n.id, n);
+      if (n.type === "SITE") this.siteById.set(n.id, n);
+      if (n.type === "R1" && n.sigmpr) this.r1BySigmpr.set(n.sigmpr, n);
+    }
+
+    for (const e of this.allEdges) {
+      if (e.type === "ANIMATION") {
+        this.edgeByTargetAnim.set(e.target, e);
+      } else {
+        const arr = this.edgesByTargetLogistics.get(e.target) || [];
+        arr.push(e);
+        this.edgesByTargetLogistics.set(e.target, arr);
+      }
+    }
+
     this.rebuildGraph();
   }
 
@@ -42,7 +69,7 @@ export class GraphService {
   }
 
   getAllSites(): Node[] {
-    return this.allNodes.filter((n) => n.type === "SITE");
+    return this.allSites;
   }
 
   getFilters(): Observable<EdgeFilters> {
@@ -74,47 +101,42 @@ export class GraphService {
 
   searchBySigmpr(term: string): SigmprSearchResult[] {
     const lowerTerm = term.toLowerCase();
-    const matchingR1s = this.allNodes.filter(
-      (n) =>
-        n.type === "R1" &&
-        n.sigmpr &&
-        n.sigmpr.toLowerCase().includes(lowerTerm),
-    );
+    const results: SigmprSearchResult[] = [];
 
-    return matchingR1s
-      .map((r1) => {
-        // First try to find parent site via ANIMATION edge
-        const animEdge = this.allEdges.find(
-          (e) => e.target === r1.id && e.type === "ANIMATION",
-        );
-        let site: Node | null = animEdge
-          ? (this.allNodes.find((n) => n.id === animEdge.source) ?? null)
-          : null;
+    for (const [sigmpr, r1] of this.r1BySigmpr) {
+      if (!sigmpr.toLowerCase().includes(lowerTerm)) continue;
 
-        // Fallback: find parent site via LOGISTICS edge
-        if (!site) {
-          const logisticsEdge = this.allEdges.find(
-            (e) => e.target === r1.id && e.type === "LOGISTICS",
-          );
-          site = logisticsEdge
-            ? (this.allNodes.find((n) => n.id === logisticsEdge.source) ?? null)
-            : null;
+      // O(1) lookup: ANIMATION edge by target
+      const animEdge = this.edgeByTargetAnim.get(r1.id);
+      let site: Node | null = animEdge
+        ? (this.siteById.get(animEdge.source) ?? null)
+        : null;
+
+      // Fallback: O(1) lookup via LOGISTICS edges
+      if (!site) {
+        const logisticsEdges = this.edgesByTargetLogistics.get(r1.id);
+        if (logisticsEdges && logisticsEdges.length > 0) {
+          site = this.siteById.get(logisticsEdges[0].source) ?? null;
         }
+      }
 
-        return {
+      if (site) {
+        results.push({
           sigmpr: r1.sigmpr!,
           r1Id: r1.id,
           r1Label: r1.label,
-          siteId: site?.id ?? "",
-          siteLabel: site?.label ?? "Site inconnu",
-        };
-      })
-      .filter((r) => r.siteId !== "");
+          siteId: site.id,
+          siteLabel: site.label,
+        });
+      }
+    }
+
+    return results;
   }
 
   private rebuildGraph(): void {
     const siteId = this.selectedSiteId$.value;
-    const site = this.allNodes.find((n) => n.id === siteId);
+    const site = this.siteById.get(siteId) ?? null;
 
     if (!site) {
       this.graphData$.next(null);
