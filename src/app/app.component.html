@@ -18,6 +18,11 @@
                 [selectedMode]="selectedLayoutMode"
                 (modeChange)="onModeChange($event)"
             ></app-layout-selector>
+            <app-sigmpr-search
+                (siteSelected)="onSigmprSiteSelect($event)"
+                (nodeSelected)="onSigmprNodeSelect($event)"
+                (nodeDeselected)="onSigmprNodeDeselect()"
+            ></app-sigmpr-search>
         </div>
     </header>
 
@@ -26,6 +31,7 @@
         <app-graph
             [graphData]="graphData"
             [layoutMode]="selectedLayoutMode"
+            [selectedNodeIdBySearch]="selectedNodeIdBySearch"
             class="absolute inset-0"
         ></app-graph>
 

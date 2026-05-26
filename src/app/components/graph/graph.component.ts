@@ -70,6 +70,7 @@ interface HierarchyDatum {
 export class GraphComponent implements OnChanges, OnDestroy {
   @Input() graphData: GraphData | null = null;
   @Input() layoutMode: LayoutMode = "force";
+  @Input() selectedNodeIdBySearch: string | null = null;
 
   @ViewChild("chartContainer", { static: true })
   container!: ElementRef<HTMLDivElement>;
@@ -112,12 +113,27 @@ export class GraphComponent implements OnChanges, OnDestroy {
       this.collapsedBranches.clear();
       this.selectedNodeId = null;
       this.renderGraph();
+      // Apply search node selection after graph rebuild
+      if (this.selectedNodeIdBySearch) {
+        this.selectedNodeId = this.selectedNodeIdBySearch;
+        this.applyNodeSelection();
+      }
     } else if (changes["layoutMode"]) {
       // Layout changed → smooth transition
       this.stopElectricAnimation();
       this.saveNodePositions();
       this.stopSimulation();
       this.renderGraph();
+    } else if (changes["selectedNodeIdBySearch"]) {
+      // Search node selection/deselection without full rebuild
+      if (this.selectedNodeIdBySearch) {
+        this.selectedNodeId = this.selectedNodeIdBySearch;
+        this.applyNodeSelection();
+      } else {
+        this.selectedNodeId = null;
+        this.stopElectricAnimation();
+        this.applyNodeSelection();
+      }
     }
   }
 

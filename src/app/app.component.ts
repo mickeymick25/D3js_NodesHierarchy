@@ -6,6 +6,7 @@ import { GraphComponent } from "./components/graph/graph.component";
 import { LegendComponent } from "./components/legend/legend.component";
 import { SiteSelectorComponent } from "./components/site-selector/site-selector.component";
 import { LayoutSelectorComponent } from "./components/layout-selector/layout-selector.component";
+import { SigmprSearchComponent } from "./components/sigmpr-search/sigmpr-search.component";
 
 @Component({
   selector: "app-root",
@@ -16,6 +17,7 @@ import { LayoutSelectorComponent } from "./components/layout-selector/layout-sel
     LegendComponent,
     SiteSelectorComponent,
     LayoutSelectorComponent,
+    SigmprSearchComponent,
   ],
   templateUrl: "./app.component.html",
   styleUrls: ["./app.component.scss"],
@@ -26,6 +28,7 @@ export class AppComponent implements OnInit {
   selectedSiteId = "";
   selectedLayoutMode: LayoutMode = "force";
   filters: EdgeFilters = { animation: true, logistics: true };
+  selectedNodeIdBySearch: string | null = null;
 
   constructor(private graphService: GraphService) {}
 
@@ -55,5 +58,17 @@ export class AppComponent implements OnInit {
 
   onModeChange(mode: LayoutMode): void {
     this.graphService.setLayoutMode(mode);
+  }
+
+  onSigmprSiteSelect(siteId: string): void {
+    this.graphService.selectSite(siteId);
+  }
+
+  onSigmprNodeSelect(nodeId: string): void {
+    this.selectedNodeIdBySearch = nodeId;
+  }
+
+  onSigmprNodeDeselect(): void {
+    this.selectedNodeIdBySearch = null;
   }
 }

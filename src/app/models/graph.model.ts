@@ -24,6 +24,14 @@ export interface GraphData {
   edges: Edge[];
 }
 
+export interface SigmprSearchResult {
+  sigmpr: string;
+  r1Id: string;
+  r1Label: string;
+  siteId: string;
+  siteLabel: string;
+}
+
 export const LAYOUT_MODES: {
   value: LayoutMode;
   label: string;

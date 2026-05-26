@@ -1,6 +1,12 @@
 import { Injectable } from "@angular/core";
 import { BehaviorSubject, Observable } from "rxjs";
-import { Node, GraphData, EdgeType, LayoutMode } from "../models/graph.model";
+import {
+  Node,
+  GraphData,
+  EdgeType,
+  LayoutMode,
+  SigmprSearchResult,
+} from "../models/graph.model";
 import { MOCK_NODES, MOCK_EDGES } from "./mock-graph-data";
 
 export interface EdgeFilters {
@@ -64,6 +70,46 @@ export class GraphService {
 
   setLayoutMode(mode: LayoutMode): void {
     this.layoutMode$.next(mode);
+  }
+
+  searchBySigmpr(term: string): SigmprSearchResult[] {
+    const lowerTerm = term.toLowerCase();
+    const matchingR1s = this.allNodes.filter(
+      (n) =>
+        n.type === "R1" &&
+        n.sigmpr &&
+        n.sigmpr.toLowerCase().includes(lowerTerm),
+    );
+
+    return matchingR1s
+      .map((r1) => {
+        // First try to find parent site via ANIMATION edge
+        const animEdge = this.allEdges.find(
+          (e) => e.target === r1.id && e.type === "ANIMATION",
+        );
+        let site: Node | null = animEdge
+          ? (this.allNodes.find((n) => n.id === animEdge.source) ?? null)
+          : null;
+
+        // Fallback: find parent site via LOGISTICS edge
+        if (!site) {
+          const logisticsEdge = this.allEdges.find(
+            (e) => e.target === r1.id && e.type === "LOGISTICS",
+          );
+          site = logisticsEdge
+            ? (this.allNodes.find((n) => n.id === logisticsEdge.source) ?? null)
+            : null;
+        }
+
+        return {
+          sigmpr: r1.sigmpr!,
+          r1Id: r1.id,
+          r1Label: r1.label,
+          siteId: site?.id ?? "",
+          siteLabel: site?.label ?? "Site inconnu",
+        };
+      })
+      .filter((r) => r.siteId !== "");
   }
 
   private rebuildGraph(): void {
