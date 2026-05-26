@@ -1,6 +1,6 @@
 export type NodeType = "SITE" | "R1" | "R2";
 
-export type LayoutMode = "force" | "tree";
+export type LayoutMode = "force" | "tree" | "dendrogram";
 
 export interface Node {
   id: string;
@@ -38,5 +38,10 @@ export const LAYOUT_MODES: {
     value: "tree",
     label: "Arborescence",
     description: "Disposition hiérarchique en arbre",
+  },
+  {
+    value: "dendrogram",
+    label: "Dendrogramme",
+    description: "Dendrogramme vertical (feuilles alignées en haut)",
   },
 ];

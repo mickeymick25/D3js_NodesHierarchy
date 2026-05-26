@@ -180,6 +180,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     this.g!.selectAll("[data-node-id]").each(function () {
       const el = d3.select(this);
       const nodeId = el.attr("data-node-id");
+      const realId = el.attr("data-real-id");
       const transform = el.attr("transform");
       if (nodeId && transform) {
         const match = transform.match(
@@ -190,6 +191,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
           const y = parseFloat(match[2]);
           if (!isNaN(x) && !isNaN(y)) {
             positions.set(nodeId, { x, y });
+            // Also save by real ID so positions survive layout mode switches
+            // (Force mode uses real IDs, Tree/Dendrogram use composite IDs)
+            if (realId && realId !== nodeId) {
+              positions.set(realId, { x, y });
+            }
           }
         }
       }
@@ -348,13 +354,13 @@ export class GraphComponent implements OnChanges, OnDestroy {
       this.addArrowMarkers(d),
     );
 
-    // Reset zoom to identity
-    this.svg!.call(this.zoomBehavior!.transform, d3.zoomIdentity);
-
     // Delegate to specialized renderers based on layout mode
     switch (this.layoutMode) {
       case "tree":
         this.renderTreeLayout();
+        break;
+      case "dendrogram":
+        this.renderDendrogramLayout();
         break;
       default:
         this.renderForceLayout();
@@ -786,7 +792,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .attr("data-node-id", (d: any) => d.data.id)
       .attr("data-real-id", (d: any) => d.data.realId || null)
       .attr("transform", (d: any) => {
-        const saved = this.savedPositions.get(d.data.id);
+        const saved =
+          this.savedPositions.get(d.data.id) ||
+          (d.data.realId ? this.savedPositions.get(d.data.realId) : null);
         if (saved) return `translate(${saved.x},${saved.y})`;
         const target = targetPositions.get(d.data.id);
         return target
@@ -1065,7 +1073,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
         sigmpr: node.sigmpr,
       };
       const target = targetPositions.get(compositeId);
-      const saved = this.savedPositions.get(compositeId);
+      const saved =
+        this.savedPositions.get(compositeId) || this.savedPositions.get(realId);
       const parentPos = parentPositions.get(compositeId);
       simNode.x = saved
         ? saved.x
@@ -1175,6 +1184,598 @@ export class GraphComponent implements OnChanges, OnDestroy {
           const ty = targetPos.y;
           const midX = (sx + tx) / 2;
           return `M${sx},${sy}C${midX},${sy} ${midX},${ty} ${tx},${ty}`;
+        });
+
+        // Update badge positions
+        linkBadges.selectAll("g").attr("transform", function () {
+          const targetId = d3.select(this).attr("data-target-id");
+          if (!targetId) return d3.select(this).attr("transform");
+          const tPos = getPosition(targetId);
+          const sourceId = parentMap.get(targetId);
+          if (!sourceId) return d3.select(this).attr("transform");
+          const sPos = getPosition(sourceId);
+          const midX = (sPos.x + tPos.x) / 2;
+          const midY = (sPos.y + tPos.y) / 2;
+          return `translate(${midX},${midY})`;
+        });
+      });
+
+    this.setupAutoZoomAndResize(
+      svg,
+      g,
+      this.zoomBehavior!,
+      containerEl,
+      centerSimNode,
+      true,
+      false,
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // DENDROGRAM LAYOUT (vertical, leaves at top, root at bottom)
+  // ═══════════════════════════════════════════════════════════════════
+
+  private renderDendrogramLayout(): void {
+    if (!this.graphData) return;
+
+    const containerEl = this.container.nativeElement;
+    const width = containerEl.clientWidth;
+    const height = containerEl.clientHeight;
+
+    // Use persistent SVG
+    const svg = this.svg!;
+    const g = this.g!;
+
+    // Build hierarchy
+    const hierarchyData = this.buildHierarchy();
+    const root = d3.hierarchy(hierarchyData);
+
+    // Apply collapsed state to branch nodes
+    root.each((node: any) => {
+      if (this.collapsedBranches.has(node.data.id) && node.children) {
+        (node as any)._children = node.children;
+        node.children = null;
+      }
+    });
+
+    // Compute cluster layout — vertical orientation (top to bottom)
+    // cluster() aligns all leaves at the same depth
+    const clusterLayout = d3
+      .cluster<HierarchyDatum>()
+      .size([width - 300, height - 80])
+      .separation((a, b) => (a.parent === b.parent ? 1 : 1.5));
+
+    clusterLayout(root);
+
+    const allNodes = root.descendants();
+
+    // Visible node IDs (for filtering collapsed nodes)
+    const visibleIds = new Set(allNodes.map((d: any) => d.data.id));
+
+    // Compute target positions for each node
+    // d3.cluster gives: d.x = horizontal spread, d.y = depth (0 = root)
+    // We want: root at bottom, leaves at top
+    // So we flip vertically: y = height - d.y - offset
+    const targetPositions = new Map<string, { x: number; y: number }>();
+    allNodes.forEach((d: any) => {
+      targetPositions.set(d.data.id, {
+        x: d.x + 150,
+        y: height - d.y - 40,
+      });
+    });
+
+    // Build parent position map for newly expanded nodes
+    const parentPositions = new Map<string, { x: number; y: number }>();
+    allNodes.forEach((d: any) => {
+      if (d.parent) {
+        const parentPos = targetPositions.get(d.parent.data.id);
+        if (parentPos) {
+          parentPositions.set(d.data.id, parentPos);
+        }
+      }
+    });
+
+    // Get center position for default transitions
+    const centerTarget = targetPositions.get(this.graphData.center.id);
+    const defaultX = centerTarget ? centerTarget.x : width / 2;
+    const defaultY = centerTarget ? centerTarget.y : height / 2;
+
+    // Draw links (from parent to child) using vertical cubic bezier
+    const treeLinks = g.append("g").attr("class", "tree-links");
+
+    treeLinks
+      .selectAll("path")
+      .data(root.links())
+      .enter()
+      .append("path")
+      .attr("fill", "none")
+      .attr("stroke", (d: any) => {
+        const childData = d.target.data as HierarchyDatum;
+        if (childData.edgeType === "ANIMATION") return COLOR_TERTIARY;
+        return COLOR_PRIMARY;
+      })
+      .attr("stroke-width", 1.5)
+      .attr("opacity", 1)
+      .attr("d", (d: any) => {
+        const sourcePos = targetPositions.get(d.source.data.id);
+        const targetPos = targetPositions.get(d.target.data.id);
+        const sx = sourcePos!.x;
+        const sy = sourcePos!.y;
+        const tx = targetPos!.x;
+        const ty = targetPos!.y;
+        const midY = (sy + ty) / 2;
+        return `M${sx},${sy}C${sx},${midY} ${tx},${midY} ${tx},${ty}`;
+      })
+      .attr("data-source-id", (d: any) => d.source.data.id)
+      .attr("data-target-id", (d: any) => d.target.data.id)
+      .attr("data-edge-type", (d: any) => {
+        const childData = d.target.data as HierarchyDatum;
+        return childData.edgeType || "LOGISTICS";
+      });
+
+    // Draw link midpoint badges
+    const linkBadges = g.append("g").attr("class", "link-badges");
+
+    root.links().forEach((link: any) => {
+      const childData = link.target.data as HierarchyDatum;
+      // Skip branches (Animation/Logistique) — only show badges on leaf links
+      if (
+        childData.id === "__animation__" ||
+        childData.id === "__logistics__" ||
+        childData.id === "__logistics_r1__" ||
+        childData.id === "__logistics_r2__"
+      )
+        return;
+
+      const sourcePos = targetPositions.get(link.source.data.id);
+      const targetPos = targetPositions.get(link.target.data.id);
+      const midX = (sourcePos!.x + targetPos!.x) / 2;
+      const midY = (sourcePos!.y + targetPos!.y) / 2;
+
+      const color =
+        childData.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+      const badgeText =
+        childData.edgeType === "ANIMATION"
+          ? "A"
+          : childData.dmsId
+            ? `DMS:${childData.dmsId}`
+            : "L";
+
+      const badgeG = linkBadges
+        .append("g")
+        .attr("data-target-id", childData.id)
+        .attr("data-edge-type", childData.edgeType || "LOGISTICS")
+        .attr("transform", `translate(${midX},${midY})`);
+
+      badgeG.append("rect").attr("rx", 6).attr("ry", 6).attr("fill", "white");
+
+      badgeG
+        .append("rect")
+        .attr("rx", 6)
+        .attr("ry", 6)
+        .attr("fill", color)
+        .attr("fill-opacity", 0.15)
+        .attr("stroke", color)
+        .attr("stroke-width", 1.5);
+
+      const textEl = badgeG
+        .append("text")
+        .attr("text-anchor", "middle")
+        .attr("dy", "0.35em")
+        .attr("font-size", childData.dmsId ? "7px" : "9px")
+        .attr("font-weight", "700")
+        .attr("fill", color)
+        .text(badgeText);
+
+      const bbox = (textEl.node() as SVGTextElement).getBBox();
+      badgeG
+        .selectAll("rect")
+        .attr("x", bbox.x - 4)
+        .attr("y", bbox.y - 2)
+        .attr("width", bbox.width + 8)
+        .attr("height", bbox.height + 4);
+    });
+
+    // Draw nodes
+    const nodeGroups = g
+      .append("g")
+      .attr("class", "tree-nodes")
+      .selectAll("g")
+      .data(allNodes)
+      .enter()
+      .append("g")
+      .attr("data-node-id", (d: any) => d.data.id)
+      .attr("data-real-id", (d: any) => d.data.realId || null)
+      .attr("transform", (d: any) => {
+        const saved =
+          this.savedPositions.get(d.data.id) ||
+          (d.data.realId ? this.savedPositions.get(d.data.realId) : null);
+        if (saved) return `translate(${saved.x},${saved.y})`;
+        const target = targetPositions.get(d.data.id);
+        return target
+          ? `translate(${target.x},${target.y})`
+          : `translate(${defaultX},${defaultY})`;
+      })
+      .attr("cursor", "pointer");
+
+    // Style each node based on its role
+    const self = this;
+    nodeGroups.each(function (d: any) {
+      const data = d.data as HierarchyDatum;
+      const g = d3.select(this);
+
+      // Branch nodes (Animation/Logistique/R1-Logistique/R2-Logistique labels)
+      if (
+        data.id === "__animation__" ||
+        data.id === "__logistics__" ||
+        data.id === "__logistics_r1__" ||
+        data.id === "__logistics_r2__"
+      ) {
+        const isAnimation = data.id === "__animation__";
+        const isLogisticsMain = data.id === "__logistics__";
+        const isR1Group = data.id === "__logistics_r1__";
+        const label = isAnimation
+          ? "Animation"
+          : isLogisticsMain
+            ? "Logistique"
+            : isR1Group
+              ? "R1"
+              : "R2";
+        const color = isAnimation ? COLOR_TERTIARY : COLOR_PRIMARY;
+        const width = isLogisticsMain ? 100 : 60;
+        const height = isLogisticsMain ? 28 : 22;
+        const fontSize = isLogisticsMain ? "11px" : "10px";
+        const fontWeight = isLogisticsMain ? "600" : "700";
+
+        g.append("rect")
+          .attr("rx", 6)
+          .attr("ry", 6)
+          .attr("width", width)
+          .attr("height", height)
+          .attr("x", -width / 2)
+          .attr("y", -height / 2)
+          .attr("fill", "white");
+
+        g.append("rect")
+          .attr("rx", 6)
+          .attr("ry", 6)
+          .attr("width", width)
+          .attr("height", height)
+          .attr("x", -width / 2)
+          .attr("y", -height / 2)
+          .attr("fill", color)
+          .attr("fill-opacity", 0.15)
+          .attr("stroke", color)
+          .attr("stroke-width", 1.5);
+
+        g.append("text")
+          .attr("text-anchor", "middle")
+          .attr("dy", "0.35em")
+          .attr("font-size", fontSize)
+          .attr("font-weight", fontWeight)
+          .attr("fill", color)
+          .text(label);
+
+        // Collapse/expand indicator — positioned below the rectangle
+        const isCollapsed = self.collapsedBranches.has(data.id);
+        const indicatorSymbol = isCollapsed ? "\u25B6" : "\u25BC";
+        g.append("circle")
+          .attr("cx", 0)
+          .attr("cy", height / 2 + 10)
+          .attr("r", 8)
+          .attr("fill", "white")
+          .attr("stroke", color)
+          .attr("stroke-width", 1.5);
+
+        g.append("text")
+          .attr("x", 0)
+          .attr("y", height / 2 + 10)
+          .attr("dy", "0.35em")
+          .attr("text-anchor", "middle")
+          .attr("font-size", "9px")
+          .attr("font-weight", "700")
+          .attr("fill", color)
+          .text(indicatorSymbol);
+
+        g.style("cursor", "pointer");
+
+        return;
+      }
+
+      // Root node (SITE R3) — at the bottom
+      if (d.depth === 0) {
+        g.append("circle")
+          .attr("r", NODE_RADIUS.SITE)
+          .attr("fill", NODE_COLORS.SITE)
+          .attr("stroke", COLOR_ELECTRIC)
+          .attr("stroke-width", 1.5);
+
+        g.append("text")
+          .text("R3")
+          .attr("dy", "0.35em")
+          .attr("text-anchor", "middle")
+          .attr("font-size", "9px")
+          .attr("font-weight", "700")
+          .attr("fill", COLOR_ON_ELECTRIC_CONTAINER);
+
+        g.append("text")
+          .text(data.label)
+          .attr("dy", NODE_RADIUS.SITE + 16)
+          .attr("text-anchor", "middle")
+          .attr("font-size", "13px")
+          .attr("font-weight", "700")
+          .attr("fill", COLOR_ON_ELECTRIC_CONTAINER);
+        return;
+      }
+
+      // Leaf nodes (R1/R2) — at the top
+      const radius = NODE_RADIUS[data.type] || 22;
+      const fillColor = NODE_COLORS[data.type] || COLOR_PRIMARY;
+      const strokeColor = NODE_STROKE_COLORS[data.type] || COLOR_ON_PRIMARY;
+
+      g.append("circle")
+        .attr("r", radius + 4)
+        .attr("fill", "none")
+        .attr("stroke", strokeColor)
+        .attr("stroke-width", 1.5)
+        .attr("stroke-opacity", 0.4);
+
+      g.append("circle")
+        .attr("r", radius)
+        .attr("fill", fillColor)
+        .attr("stroke", strokeColor)
+        .attr("stroke-width", 2.5);
+
+      g.append("text")
+        .text(NODE_LABELS[data.type] || "")
+        .attr("dy", "0.35em")
+        .attr("text-anchor", "middle")
+        .attr("font-size", "10px")
+        .attr("font-weight", "700")
+        .attr("fill", NODE_TEXT_COLORS[data.type]);
+
+      // Label below the circle in dendrogram (vertical layout)
+      g.append("text")
+        .text(data.label)
+        .attr("dy", radius + 16)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "11px")
+        .attr("font-weight", "500")
+        .attr("fill", COLOR_ON_SECONDARY_CONTAINER);
+
+      // SIGMPR mini-tag for R1 leaf nodes
+      if (data.type === "R1" && data.sigmpr) {
+        const sigmprText = `SIGMPR:${data.sigmpr}`;
+        const sigmprG = g.append("g");
+        const sigmprColor = NODE_STROKE_COLORS[data.type] || COLOR_PRIMARY;
+        sigmprG
+          .append("rect")
+          .attr("rx", 6)
+          .attr("ry", 6)
+          .attr("fill", "white");
+        sigmprG
+          .append("rect")
+          .attr("rx", 6)
+          .attr("ry", 6)
+          .attr("fill", sigmprColor)
+          .attr("fill-opacity", 0.15)
+          .attr("stroke", sigmprColor)
+          .attr("stroke-width", 1.5);
+        const sigmprTextEl = sigmprG
+          .append("text")
+          .text(sigmprText)
+          .attr("x", 0)
+          .attr("y", radius + 30)
+          .attr("text-anchor", "middle")
+          .attr("font-size", "7px")
+          .attr("font-weight", "700")
+          .attr("fill", sigmprColor)
+          .attr("pointer-events", "none");
+        const sigmprBbox = (sigmprTextEl.node() as SVGTextElement).getBBox();
+        sigmprG
+          .selectAll("rect")
+          .attr("x", sigmprBbox.x - 3)
+          .attr("y", sigmprBbox.y - 1.5)
+          .attr("width", sigmprBbox.width + 6)
+          .attr("height", sigmprBbox.height + 3);
+      }
+    });
+
+    // ── Hover interactions ──
+    const tooltipGroup = g.append("g").attr("class", "link-labels");
+    this.addHierarchyHoverInteractions(
+      nodeGroups,
+      treeLinks.selectAll("path"),
+      linkBadges,
+      this.graphData.center.id,
+      root,
+      tooltipGroup,
+      targetPositions,
+    );
+
+    // ── Click handlers: R1/R2 selection + branch collapse/expand ──
+    nodeGroups.on("click", (_event: MouseEvent, d: any) => {
+      const data = d.data as HierarchyDatum;
+      if (
+        data.id === "__animation__" ||
+        data.id === "__logistics__" ||
+        data.id === "__logistics_r1__" ||
+        data.id === "__logistics_r2__"
+      ) {
+        // Branch node → toggle collapse/expand
+        if (this.collapsedBranches.has(data.id)) {
+          this.collapsedBranches.delete(data.id);
+        } else {
+          this.collapsedBranches.add(data.id);
+        }
+        this.saveNodePositions();
+        this.stopSimulation();
+        this.renderGraph();
+      } else if (data.type === "R1" || data.type === "R2") {
+        // R1/R2 leaf node → toggle selection using realId
+        const selectId = data.realId || data.id;
+        this.selectedNodeId =
+          this.selectedNodeId === selectId ? null : selectId;
+        this.applyNodeSelection();
+      }
+    });
+
+    // ── Simulation ──
+    const leafNodeIds = new Set<string>();
+    const compositeToRealId = new Map<string, string>();
+    allNodes.forEach((d: any) => {
+      const data = d.data as HierarchyDatum;
+      if (
+        (data.type === "R1" || data.type === "R2") &&
+        data.id !== this.graphData!.center.id &&
+        data.realId
+      ) {
+        leafNodeIds.add(data.id);
+        compositeToRealId.set(data.id, data.realId);
+      }
+    });
+
+    const simNodes: SimNode[] = [];
+    const simNodeMap = new Map<string, SimNode>();
+
+    // Center node (pinned)
+    const centerSimNode: SimNode = {
+      id: this.graphData!.center.id,
+      label: this.graphData!.center.label,
+      type: this.graphData!.center.type,
+    };
+    const centerSimTarget = targetPositions.get(this.graphData.center.id);
+    const savedCenterPos = this.savedPositions.get(this.graphData.center.id);
+    centerSimNode.fx = centerSimTarget ? centerSimTarget.x : width / 2;
+    centerSimNode.fy = centerSimTarget ? centerSimTarget.y : height / 2;
+    centerSimNode.x = savedCenterPos ? savedCenterPos.x : centerSimNode.fx;
+    centerSimNode.y = savedCenterPos ? savedCenterPos.y : centerSimNode.fy;
+    simNodes.push(centerSimNode);
+    simNodeMap.set(centerSimNode.id, centerSimNode);
+
+    // Leaf nodes (draggable)
+    for (const compositeId of leafNodeIds) {
+      const realId = compositeToRealId.get(compositeId)!;
+      const node = this.graphData!.nodes.find((n) => n.id === realId);
+      if (!node) continue;
+      const simNode: SimNode = {
+        id: compositeId,
+        label: node.label,
+        type: node.type as NodeType,
+        sigmpr: node.sigmpr,
+      };
+      const target = targetPositions.get(compositeId);
+      const saved =
+        this.savedPositions.get(compositeId) || this.savedPositions.get(realId);
+      const parentPos = parentPositions.get(compositeId);
+      simNode.x = saved
+        ? saved.x
+        : parentPos
+          ? parentPos.x
+          : target
+            ? target.x
+            : width / 2;
+      simNode.y = saved
+        ? saved.y
+        : parentPos
+          ? parentPos.y
+          : target
+            ? target.y
+            : height / 2;
+      simNodes.push(simNode);
+      simNodeMap.set(simNode.id, simNode);
+    }
+
+    // Build parent map for badge updates
+    const parentMap = new Map<string, string>();
+    root.links().forEach((link: any) => {
+      parentMap.set(link.target.data.id, link.source.data.id);
+    });
+
+    // Position lookup: simulation nodes > target positions
+    const getPosition = (id: string): { x: number; y: number } => {
+      const sn = simNodeMap.get(id);
+      if (sn && sn.x !== undefined && sn.y !== undefined) {
+        return { x: sn.x, y: sn.y };
+      }
+      const t = targetPositions.get(id);
+      if (t) return t;
+      return { x: width / 2, y: height / 2 };
+    };
+
+    // Drag behavior on leaf nodes only
+    const leafNodeGroups = nodeGroups.filter((d: any) =>
+      leafNodeIds.has(d.data.id),
+    );
+
+    const svgEl = this.svg!.node()!;
+
+    leafNodeGroups.call(
+      d3
+        .drag<SVGGElement, any>()
+        .container(svgEl)
+        .on("start", (event: any, d: any) => {
+          const sn = simNodeMap.get(d.data.id);
+          if (!sn) return;
+          if (!event.active) this.simulation?.alphaTarget(0.3).restart();
+          sn.fx = sn.x;
+          sn.fy = sn.y;
+        })
+        .on("drag", (event: any, d: any) => {
+          const sn = simNodeMap.get(d.data.id);
+          if (!sn) return;
+          const [mx, my] = d3.pointer(event, svgEl);
+          sn.fx = mx;
+          sn.fy = my;
+        })
+        .on("end", (event: any, d: any) => {
+          const sn = simNodeMap.get(d.data.id);
+          if (!sn) return;
+          if (!event.active) this.simulation?.alphaTarget(0);
+          sn.fx = null;
+          sn.fy = null;
+        }),
+    );
+
+    // Force simulation
+    this.simulation = d3
+      .forceSimulation<SimNode>(simNodes)
+      .force(
+        "x",
+        d3
+          .forceX<SimNode>((d) => {
+            const t = targetPositions.get(d.id);
+            return t ? t.x : width / 2;
+          })
+          .strength(0.5),
+      )
+      .force(
+        "y",
+        d3
+          .forceY<SimNode>((d) => {
+            const t = targetPositions.get(d.id);
+            return t ? t.y : height / 2;
+          })
+          .strength(0.5),
+      )
+      .force("collide", d3.forceCollide().radius(30).strength(0.3))
+      .on("tick", () => {
+        // Update node positions
+        nodeGroups.attr("transform", (d: any) => {
+          const pos = getPosition(d.data.id);
+          return `translate(${pos.x},${pos.y})`;
+        });
+
+        // Update link paths — vertical bezier curves
+        treeLinks.selectAll("path").attr("d", (d: any) => {
+          const sourcePos = getPosition(d.source.data.id);
+          const targetPos = getPosition(d.target.data.id);
+          const sx = sourcePos.x;
+          const sy = sourcePos.y;
+          const tx = targetPos.x;
+          const ty = targetPos.y;
+          const midY = (sy + ty) / 2;
+          return `M${sx},${sy}C${sx},${midY} ${tx},${midY} ${tx},${ty}`;
         });
 
         // Update badge positions
@@ -1778,7 +2379,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       !!targetId &&
       (sourceId === selectedId || targetId === selectedId);
 
-    if (this.layoutMode === "tree") {
+    if (this.layoutMode === "tree" || this.layoutMode === "dendrogram") {
       // Hierarchy modes: highlight ancestors + descendants
       const hierarchyData = this.buildHierarchy();
       const root = d3.hierarchy(hierarchyData);
