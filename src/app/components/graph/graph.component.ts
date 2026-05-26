@@ -51,6 +51,7 @@ interface SimLink extends d3.SimulationLinkDatum<SimNode> {
 /** Hierarchy node used for tree/radial D3 hierarchy layouts */
 interface HierarchyDatum {
   id: string;
+  realId?: string; // original node ID (when id is a composite for uniqueness)
   label: string;
   type: NodeType;
   edgeType?: "ANIMATION" | "LOGISTICS";
@@ -251,7 +252,8 @@ export class GraphComponent implements OnChanges, OnDestroy {
       if (!targetNode) continue;
 
       const leaf: HierarchyDatum = {
-        id: targetNode.id,
+        id: `${targetNode.id}___${edge.type}`,
+        realId: targetNode.id,
         label: targetNode.label,
         type: targetNode.type,
         edgeType: edge.type,
@@ -782,6 +784,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       .enter()
       .append("g")
       .attr("data-node-id", (d: any) => d.data.id)
+      .attr("data-real-id", (d: any) => d.data.realId || null)
       .attr("transform", (d: any) => {
         const saved = this.savedPositions.get(d.data.id);
         if (saved) return `translate(${saved.x},${saved.y})`;
@@ -1005,18 +1008,32 @@ export class GraphComponent implements OnChanges, OnDestroy {
         this.stopSimulation();
         this.renderGraph();
       } else if (data.type === "R1" || data.type === "R2") {
-        // R1/R2 leaf node → toggle selection
-        this.selectedNodeId = this.selectedNodeId === data.id ? null : data.id;
+        // R1/R2 leaf node → toggle selection using realId
+        const selectId = data.realId || data.id;
+        this.selectedNodeId =
+          this.selectedNodeId === selectId ? null : selectId;
         this.applyNodeSelection();
       }
     });
 
     // ── Simulation ──
-    const leafNodeIds = new Set(
-      this.graphData!.nodes.filter(
-        (n) => n.id !== this.graphData!.center.id && visibleIds.has(n.id),
-      ).map((n) => n.id),
-    );
+    // Build leafNodeIds using composite IDs from the tree hierarchy,
+    // since node groups use composite IDs as data-node-id.
+    const leafNodeIds = new Set<string>();
+    // Also build a mapping from composite ID to real ID for drag/simulation
+    const compositeToRealId = new Map<string, string>();
+    allNodes.forEach((d: any) => {
+      const data = d.data as HierarchyDatum;
+      // Only leaf nodes (R1/R2) that are not the center
+      if (
+        (data.type === "R1" || data.type === "R2") &&
+        data.id !== this.graphData!.center.id &&
+        data.realId // only actual leaf nodes, not grouping branches
+      ) {
+        leafNodeIds.add(data.id);
+        compositeToRealId.set(data.id, data.realId);
+      }
+    });
 
     const simNodes: SimNode[] = [];
     const simNodeMap = new Map<string, SimNode>();
@@ -1036,19 +1053,20 @@ export class GraphComponent implements OnChanges, OnDestroy {
     simNodes.push(centerSimNode);
     simNodeMap.set(centerSimNode.id, centerSimNode);
 
-    // Leaf nodes (draggable) — only visible ones
-    for (const node of this.graphData!.nodes) {
-      if (node.id === this.graphData!.center.id) continue;
-      if (!visibleIds.has(node.id)) continue;
+    // Leaf nodes (draggable) — use composite IDs from the tree hierarchy
+    for (const compositeId of leafNodeIds) {
+      const realId = compositeToRealId.get(compositeId)!;
+      const node = this.graphData!.nodes.find((n) => n.id === realId);
+      if (!node) continue;
       const simNode: SimNode = {
-        id: node.id,
+        id: compositeId,
         label: node.label,
         type: node.type,
         sigmpr: node.sigmpr,
       };
-      const target = targetPositions.get(node.id);
-      const saved = this.savedPositions.get(node.id);
-      const parentPos = parentPositions.get(node.id);
+      const target = targetPositions.get(compositeId);
+      const saved = this.savedPositions.get(compositeId);
+      const parentPos = parentPositions.get(compositeId);
       simNode.x = saved
         ? saved.x
         : parentPos
@@ -1233,13 +1251,17 @@ export class GraphComponent implements OnChanges, OnDestroy {
 
     // ── Electric glow filter for selection animation ──
     // Wide blur = visible "wire" underneath, narrow blur = close glow, original = "current pulses"
+    // Use filterUnits=userSpaceOnUse with a large region to avoid clipping the glow
+    // on thin paths (objectBoundingBox percentages are relative to the path's bbox,
+    // which can be too small for the Gaussian blur on nearly-horizontal/vertical paths).
     defs
       .append("filter")
       .attr("id", "electric-glow")
-      .attr("x", "-10%")
-      .attr("y", "-100%")
-      .attr("width", "120%")
-      .attr("height", "300%")
+      .attr("filterUnits", "userSpaceOnUse")
+      .attr("x", "-5000")
+      .attr("y", "-5000")
+      .attr("width", "10000")
+      .attr("height", "10000")
       .call((f) => {
         f.append("feGaussianBlur")
           .attr("in", "SourceGraphic")
@@ -1619,33 +1641,71 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const isCenter = nodeId === self.graphData!.center.id;
         if (isCenter) return;
 
+        // For tree mode leaf nodes, resolve realId for nodeType lookup
+        const realId = nodeGroup.attr("data-real-id") || nodeId;
         const nodeType = self.graphData!.nodes.find(
-          (n) => n.id === nodeId,
+          (n) => n.id === realId,
         )?.type;
-        if (!nodeType) return;
 
-        const circles = nodeGroup.selectAll("circle");
-        const innerCircle = circles.filter(function () {
-          const r = d3.select(this).attr("r");
-          return r === "30" || r === "22";
-        });
-
-        innerCircle
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("fill", NODE_COLORS[nodeType])
-          .attr("stroke", NODE_STROKE_COLORS[nodeType]);
-        circles
-          .filter(function () {
+        // Branch grouping nodes (__animation__, __logistics__, __logistics_r1__, __logistics_r2__)
+        // don't exist in graphData.nodes — skip circle color reset for them.
+        // Their rect colors are reset separately below.
+        if (nodeType) {
+          const circles = nodeGroup.selectAll("circle");
+          const innerCircle = circles.filter(function () {
             const r = d3.select(this).attr("r");
-            return r === "34" || r === "26";
-          })
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("stroke", NODE_STROKE_COLORS[nodeType])
-          .attr("stroke-opacity", 0.4);
+            return r === "30" || r === "22";
+          });
+
+          innerCircle
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", NODE_COLORS[nodeType])
+            .attr("stroke", NODE_STROKE_COLORS[nodeType]);
+          circles
+            .filter(function () {
+              const r = d3.select(this).attr("r");
+              return r === "34" || r === "26";
+            })
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("stroke", NODE_STROKE_COLORS[nodeType])
+            .attr("stroke-opacity", 0.4);
+        }
+
+        // Reset branch grouping nodes' rect styling
+        const isBranch =
+          nodeId === "__animation__" ||
+          nodeId === "__logistics__" ||
+          nodeId === "__logistics_r1__" ||
+          nodeId === "__logistics_r2__";
+        if (isBranch) {
+          const color =
+            nodeId === "__animation__" ? COLOR_TERTIARY : COLOR_PRIMARY;
+          nodeGroup
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
+          nodeGroup
+            .select("rect:last-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color)
+            .attr("fill-opacity", 0.15)
+            .attr("stroke", color)
+            .attr("stroke-width", 1.5);
+          nodeGroup
+            .select("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color);
+        }
       });
 
       // Reset edge labels to default colors with transition
@@ -1705,6 +1765,10 @@ export class GraphComponent implements OnChanges, OnDestroy {
     const selectedId = this.selectedNodeId;
     const centerId = this.graphData.center.id;
 
+    // highlighted set: used to determine which branch grouping nodes to style
+    // in tree mode. In force mode, there are no branch nodes, so it stays empty.
+    let highlighted = new Set<string>();
+
     // Helper: determine if a link/badge is connected to the selected node
     const isConnected = (
       sourceId: string | null,
@@ -1755,9 +1819,32 @@ export class GraphComponent implements OnChanges, OnDestroy {
         }
       });
 
-      const ancestors = ancestorMap.get(selectedId) || new Set<string>();
-      const descendants = descendantMap.get(selectedId) || new Set<string>();
-      const highlighted = new Set([...ancestors, ...descendants]);
+      // Build merged ancestors set by looking up ALL composite IDs matching selectedId
+      let ancestors = new Set<string>();
+      let descendants = new Set<string>();
+      root.descendants().forEach((d: any) => {
+        const data = d.data as HierarchyDatum;
+        if ((data.realId || data.id) === selectedId) {
+          const a = ancestorMap.get(d.data.id);
+          const desc = descendantMap.get(d.data.id);
+          if (a) a.forEach((x) => ancestors.add(x));
+          if (desc) desc.forEach((x) => descendants.add(x));
+        }
+      });
+      let highlightedTree = new Set([...ancestors, ...descendants]);
+
+      // With composite IDs (e.g. "r1-6___ANIMATION"), the selectedId ("r1-6") won't
+      // match directly. Find all nodes whose realId or id matches and merge their paths.
+      root.descendants().forEach((d: any) => {
+        const data = d.data as HierarchyDatum;
+        if ((data.realId || data.id) === selectedId) {
+          const a = ancestorMap.get(d.data.id);
+          const desc = descendantMap.get(d.data.id);
+          if (a) a.forEach((x) => highlightedTree.add(x));
+          if (desc) desc.forEach((x) => highlightedTree.add(x));
+        }
+      });
+      highlighted = highlightedTree;
 
       allNodes
         .interrupt()
@@ -1802,7 +1889,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const connected = targetId && highlighted.has(targetId);
         // Only highlight badges whose target is a leaf in the selected path
         const isOnSelectedPath =
-          connected && (targetId === selectedId || ancestors.has(targetId));
+          connected && (ancestors.has(targetId) || descendants.has(targetId));
         badgeG
           .interrupt()
           .transition()
@@ -1958,8 +2045,73 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const nodeId = nodeGroup.attr("data-node-id");
       if (!nodeId) return;
 
-      const isSelected = nodeId === selectedId;
+      // For tree mode leaf nodes, resolve realId for isSelected and nodeType lookups
+      const realId = nodeGroup.attr("data-real-id") || nodeId;
+      const isSelected = realId === selectedId;
       const isCenter = nodeId === centerId;
+
+      // Branch grouping nodes
+      const isBranch =
+        nodeId === "__animation__" ||
+        nodeId === "__logistics__" ||
+        nodeId === "__logistics_r1__" ||
+        nodeId === "__logistics_r2__";
+
+      // Style branch grouping nodes when on the highlighted path
+      if (isBranch) {
+        const onPath = highlighted.has(nodeId);
+        const branchColor =
+          nodeId === "__animation__" ? COLOR_TERTIARY : COLOR_PRIMARY;
+        if (onPath) {
+          // Electric colors for branch nodes on the selected path
+          // Make background rect transparent so electric current on links is visible through it
+          nodeGroup
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "transparent");
+          nodeGroup
+            .select("rect:last-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", COLOR_ELECTRIC)
+            .attr("fill-opacity", 0.15)
+            .attr("stroke", COLOR_ELECTRIC)
+            .attr("stroke-width", 1.5);
+          nodeGroup
+            .select("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", COLOR_ELECTRIC);
+        } else {
+          // Reset to default colors
+          nodeGroup
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
+          nodeGroup
+            .select("rect:last-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", branchColor)
+            .attr("fill-opacity", 0.15)
+            .attr("stroke", branchColor)
+            .attr("stroke-width", 1.5);
+          nodeGroup
+            .select("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", branchColor);
+        }
+        return; // branch nodes don't have circles
+      }
 
       // Find the inner circle (r = NODE_RADIUS)
       const circles = nodeGroup.selectAll("circle");
@@ -1990,7 +2142,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       } else if (!isCenter) {
         // Reset to default container colors with transition
         const nodeType = self.graphData!.nodes.find(
-          (n) => n.id === nodeId,
+          (n) => n.id === realId,
         )?.type;
         if (nodeType) {
           innerCircle
@@ -2330,7 +2482,11 @@ export class GraphComponent implements OnChanges, OnDestroy {
         const sr = NODE_RADIUS[src.type] || 22;
         const startX = sx + (dx / len) * sr;
         const startY = sy + (dy / len) * sr;
-        return `M${startX},${startY}L${tx},${ty}`;
+        // Shorten at target end so the path doesn't go behind the target circle
+        const tr = targetRadius(d.targetId);
+        const ex = tx - (dx / len) * tr;
+        const ey = ty - (dy / len) * tr;
+        return `M${startX},${startY}L${ex},${ey}`;
       } else {
         const tr = targetRadius(d.targetId);
         const ex = tx - (dx / len) * tr;
@@ -2354,7 +2510,14 @@ export class GraphComponent implements OnChanges, OnDestroy {
       const slen = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
       const startX = sx + (sdx / slen) * sr;
       const startY = sy + (sdy / slen) * sr;
-      return `M${startX},${startY}Q${cx},${cy} ${tx},${ty}`;
+      // Shorten at target end so the path doesn't go behind the target circle
+      const tdx = tx - cx;
+      const tdy = ty - cy;
+      const tlen = Math.sqrt(tdx * tdx + tdy * tdy) || 1;
+      const tr = targetRadius(d.targetId);
+      const ex = tx - (tdx / tlen) * tr;
+      const ey = ty - (tdy / tlen) * tr;
+      return `M${startX},${startY}Q${cx},${cy} ${ex},${ey}`;
     } else {
       const tdx = tx - cx;
       const tdy = ty - cy;
