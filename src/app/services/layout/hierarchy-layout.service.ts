@@ -28,6 +28,7 @@ import {
   type HierarchyDatum,
   type NodeType,
 } from "../../models/graph.model";
+import { type ElementRefs } from "../../models/element-refs";
 import { type HierarchyConfig } from "../../models/hierarchy-config";
 import { SvgBuilderService } from "../svg-builder.service";
 import {
@@ -44,6 +45,11 @@ import {
   NODE_RADIUS,
   NODE_LABELS,
 } from "../../models/colors";
+import {
+  computeCenteredBadgeRect,
+  computeCenteredTagRect,
+  computeStartAnchorTagRect,
+} from "../../models/text-measurer";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Type aliases for D3 hierarchy links
@@ -71,6 +77,7 @@ export interface HierarchyRenderContext {
   savedPositions: Map<string, { x: number; y: number }>;
   selectedNodeId: string | null;
   collapsedBranches: Set<string>;
+  elementRefs: ElementRefs;
   onNodeSelect: (nodeId: string | null) => void;
   onApplyNodeSelection: () => void;
   buildHierarchy: () => HierarchyDatum;
@@ -97,6 +104,7 @@ export class HierarchyLayoutService {
       containerEl,
       savedPositions,
       collapsedBranches,
+      elementRefs,
     } = ctx;
     const width = containerEl.clientWidth;
     const height = containerEl.clientHeight;
@@ -150,6 +158,7 @@ export class HierarchyLayoutService {
       .data(root.links())
       .enter()
       .append("path")
+      .attr("class", "g-edge")
       .attr("fill", "none")
       .attr("stroke", (d: HierarchyLink) => {
         const childData = d.target.data as HierarchyDatum;
@@ -186,6 +195,7 @@ export class HierarchyLayoutService {
       .data(allNodes)
       .enter()
       .append("g")
+      .attr("class", "g-node")
       .attr(
         "data-node-id",
         (d: HierarchyPointNode<HierarchyDatum>) => d.data.id,
@@ -208,12 +218,36 @@ export class HierarchyLayoutService {
 
     this.drawNodes(nodeGroups, collapsedBranches, config);
 
+    // ── Populate ElementRefs for O(1) lookups ──
+    nodeGroups.each(function (d: HierarchyPointNode<HierarchyDatum>) {
+      elementRefs.nodeGroupMap.set(d.data.id, select(this));
+      elementRefs.nodeRealIdMap.set(d.data.id, d.data.realId || d.data.id);
+    });
+
+    treeLinks.selectAll<SVGPathElement, HierarchyLink>("path").each(function (
+      d: HierarchyLink,
+    ) {
+      const childData = d.target.data as HierarchyDatum;
+      const edgeType = childData.edgeType || "LOGISTICS";
+      const key = `${d.source.data.id}|${d.target.data.id}|${edgeType}`;
+      elementRefs.edgePathMap.set(key, select(this));
+    });
+
+    linkBadges.selectAll<SVGGElement, unknown>("g").each(function () {
+      const badgeG = select(this);
+      const targetId = badgeG.attr("data-target-id");
+      const edgeType = badgeG.attr("data-edge-type");
+      if (targetId && edgeType) {
+        elementRefs.badgeGroupMap.set(targetId, badgeG);
+        elementRefs.badgeEdgeTypeMap.set(targetId, edgeType);
+      }
+    });
+
     // ── Hover interactions ──
     const tooltipGroup = g.append("g").attr("class", "link-labels");
     this.addHoverInteractions(
       nodeGroups,
       treeLinks.selectAll("path"),
-      linkBadges,
       graphData.center.id,
       root,
       tooltipGroup,
@@ -380,17 +414,15 @@ export class HierarchyLayoutService {
         );
       });
 
-      // Update badge positions
-      linkBadges.selectAll("g").attr("transform", function () {
-        const targetId = select(this).attr("data-target-id");
-        if (!targetId) return select(this).attr("transform");
+      // Update badge positions — iterate ElementRefs map instead of DOM reads
+      elementRefs.badgeGroupMap.forEach((badgeG, targetId) => {
         const tPos = getPosition(targetId);
         const sourceId = parentMap.get(targetId);
-        if (!sourceId) return select(this).attr("transform");
+        if (!sourceId) return;
         const sPos = getPosition(sourceId);
         const midX = (sPos.x + tPos.x) / 2;
         const midY = (sPos.y + tPos.y) / 2;
-        return `translate(${midX},${midY})`;
+        badgeG.attr("transform", `translate(${midX},${midY})`);
       });
     });
 
@@ -444,6 +476,7 @@ export class HierarchyLayoutService {
 
       const badgeG = linkBadges
         .append("g")
+        .attr("class", "g-badge")
         .attr("data-target-id", childData.id)
         .attr("data-edge-type", childData.edgeType || "LOGISTICS")
         .attr("transform", `translate(${midX},${midY})`);
@@ -459,22 +492,30 @@ export class HierarchyLayoutService {
         .attr("stroke", color)
         .attr("stroke-width", 1.5);
 
+      const badgeFontSize = childData.dmsId ? 7 : 9;
       const textEl = badgeG
         .append("text")
         .attr("text-anchor", "middle")
         .attr("dy", "0.35em")
-        .attr("font-size", childData.dmsId ? "7px" : "9px")
+        .attr("font-size", `${badgeFontSize}px`)
         .attr("font-weight", "700")
         .attr("fill", color)
         .text(badgeText);
 
-      const bbox = (textEl.node() as SVGTextElement).getBBox();
+      // P10: Pre-computed badge dimensions (replaces getBBox)
+      const badgeRect = computeCenteredBadgeRect(
+        badgeText,
+        badgeFontSize,
+        "700",
+        4,
+        2,
+      );
       badgeG
         .selectAll("rect")
-        .attr("x", bbox.x - 4)
-        .attr("y", bbox.y - 2)
-        .attr("width", bbox.width + 8)
-        .attr("height", bbox.height + 4);
+        .attr("x", badgeRect.x)
+        .attr("y", badgeRect.y)
+        .attr("width", badgeRect.width)
+        .attr("height", badgeRect.height);
     });
   }
 
@@ -578,6 +619,7 @@ export class HierarchyLayoutService {
       // Root node (SITE)
       if (d.depth === 0) {
         g.append("circle")
+          .attr("class", "inner-circle")
           .attr("r", NODE_RADIUS.SITE)
           .attr("fill", NODE_COLORS.SITE)
           .attr("stroke", COLOR_ELECTRIC)
@@ -607,6 +649,7 @@ export class HierarchyLayoutService {
       const strokeColor = NODE_STROKE_COLORS[data.type] || COLOR_ON_PRIMARY;
 
       g.append("circle")
+        .attr("class", "halo-circle")
         .attr("r", radius + 4)
         .attr("fill", "none")
         .attr("stroke", strokeColor)
@@ -614,6 +657,7 @@ export class HierarchyLayoutService {
         .attr("stroke-opacity", 0.4);
 
       g.append("circle")
+        .attr("class", "inner-circle")
         .attr("r", radius)
         .attr("fill", fillColor)
         .attr("stroke", strokeColor)
@@ -670,8 +714,8 @@ export class HierarchyLayoutService {
           .attr("stroke-width", 1.5);
 
         if (config.labelPosition === "right") {
-          // Tree: tag to the right of the label
-          const sigmprTextEl = sigmprG
+          // Tree: tag to the right of the label (text-anchor: "start")
+          sigmprG
             .append("text")
             .text(sigmprText)
             .attr("x", radius + 8)
@@ -682,16 +726,25 @@ export class HierarchyLayoutService {
             .attr("fill", sigmprColor)
             .attr("pointer-events", "none");
 
-          const sigmprBbox = (sigmprTextEl.node() as SVGTextElement).getBBox();
+          // P10: Pre-computed tag dimensions (replaces getBBox)
+          const tagRect = computeStartAnchorTagRect(
+            sigmprText,
+            7,
+            "700",
+            radius + 8,
+            18,
+            3,
+            1.5,
+          );
           sigmprG
             .selectAll("rect")
-            .attr("x", sigmprBbox.x - 3)
-            .attr("y", sigmprBbox.y - 1.5)
-            .attr("width", sigmprBbox.width + 6)
-            .attr("height", sigmprBbox.height + 3);
+            .attr("x", tagRect.x)
+            .attr("y", tagRect.y)
+            .attr("width", tagRect.width)
+            .attr("height", tagRect.height);
         } else {
-          // Dendrogram: tag below the label
-          const sigmprTextEl = sigmprG
+          // Dendrogram: tag below the label (text-anchor: "middle")
+          sigmprG
             .append("text")
             .text(sigmprText)
             .attr("x", 0)
@@ -702,13 +755,22 @@ export class HierarchyLayoutService {
             .attr("fill", sigmprColor)
             .attr("pointer-events", "none");
 
-          const sigmprBbox = (sigmprTextEl.node() as SVGTextElement).getBBox();
+          // P10: Pre-computed tag dimensions (replaces getBBox)
+          const tagRect = computeCenteredTagRect(
+            sigmprText,
+            7,
+            "700",
+            0,
+            radius + 30,
+            3,
+            1.5,
+          );
           sigmprG
             .selectAll("rect")
-            .attr("x", sigmprBbox.x - 3)
-            .attr("y", sigmprBbox.y - 1.5)
-            .attr("width", sigmprBbox.width + 6)
-            .attr("height", sigmprBbox.height + 3);
+            .attr("x", tagRect.x)
+            .attr("y", tagRect.y)
+            .attr("width", tagRect.width)
+            .attr("height", tagRect.height);
         }
       }
     });
@@ -731,13 +793,13 @@ export class HierarchyLayoutService {
       SVGGElement,
       unknown
     >,
-    badgeGroup: Selection<SVGGElement, unknown, null, undefined>,
     centerId: string,
     hierarchyRoot: HierarchyPointNode<HierarchyDatum>,
     tooltipGroup: Selection<SVGGElement, unknown, null, undefined>,
     targetPositions: Map<string, { x: number; y: number }>,
     ctx: HierarchyRenderContext,
   ): void {
+    const elementRefs = ctx.elementRefs;
     // Build ancestor and descendant maps
     const ancestorMap = new Map<string, Set<string>>();
     const descendantMap = new Map<string, Set<string>>();
@@ -778,41 +840,38 @@ export class HierarchyLayoutService {
 
           nodeGroups.interrupt();
           linkPathSelection.interrupt();
-          badgeGroup.selectAll("g").interrupt();
+          elementRefs.badgeGroupMap.forEach((sel) => sel.interrupt());
 
           if (nodeId === centerId) {
-            nodeGroups.attr(
-              "opacity",
-              (n: HierarchyPointNode<HierarchyDatum>) =>
-                n.data.id === centerId ? 1 : 0.25,
+            elementRefs.nodeGroupMap.forEach((sel, mapNodeId) =>
+              sel.classed("dimmed", mapNodeId !== centerId),
             );
-            linkPathSelection.attr("opacity", 1);
-            badgeGroup.selectAll("g").attr("opacity", 1);
+            elementRefs.edgePathMap.forEach((sel) =>
+              sel.classed("dimmed", false),
+            );
+            elementRefs.badgeGroupMap.forEach((sel) =>
+              sel.classed("dimmed", false),
+            );
           } else {
             const ancestors = ancestorMap.get(nodeId) || new Set<string>();
             const descendants = descendantMap.get(nodeId) || new Set<string>();
             const highlighted = new Set([...ancestors, ...descendants]);
 
-            nodeGroups.attr(
-              "opacity",
-              (n: HierarchyPointNode<HierarchyDatum>) =>
-                highlighted.has(n.data.id) ? 1 : 0.25,
+            elementRefs.nodeGroupMap.forEach((sel, mapNodeId) =>
+              sel.classed("dimmed", !highlighted.has(mapNodeId)),
             );
-            linkPathSelection.attr("opacity", (l: HierarchyLink) => {
-              const sourceId = l.source.data.id;
-              const targetId = l.target.data.id;
-              return highlighted.has(sourceId) && highlighted.has(targetId)
-                ? 1
-                : 0.12;
-            });
-            badgeGroup.selectAll("g").each(function () {
-              const el = select(this);
-              const targetId = el.attr("data-target-id");
-              el.attr(
-                "opacity",
-                targetId && highlighted.has(targetId) ? 1 : 0.12,
+            elementRefs.edgePathMap.forEach((sel, edgeKey) => {
+              const parts = edgeKey.split("|");
+              const sourceId = parts[0];
+              const targetId = parts[1];
+              sel.classed(
+                "dimmed",
+                !(highlighted.has(sourceId) && highlighted.has(targetId)),
               );
             });
+            elementRefs.badgeGroupMap.forEach((sel, targetId) =>
+              sel.classed("dimmed", !highlighted.has(targetId)),
+            );
           }
         },
       )
@@ -820,13 +879,16 @@ export class HierarchyLayoutService {
         if (ctx.selectedNodeId) {
           ctx.onApplyNodeSelection();
         } else {
-          nodeGroups.interrupt();
-          linkPathSelection.interrupt();
-          badgeGroup.selectAll("g").interrupt();
-
-          nodeGroups.attr("opacity", 1);
-          linkPathSelection.attr("opacity", 1);
-          badgeGroup.selectAll("g").attr("opacity", 1);
+          // Reset all dimmed states — CSS transition handles the animation
+          elementRefs.nodeGroupMap.forEach((sel) =>
+            sel.classed("dimmed", false),
+          );
+          elementRefs.edgePathMap.forEach((sel) =>
+            sel.classed("dimmed", false),
+          );
+          elementRefs.badgeGroupMap.forEach((sel) =>
+            sel.classed("dimmed", false),
+          );
         }
       });
 

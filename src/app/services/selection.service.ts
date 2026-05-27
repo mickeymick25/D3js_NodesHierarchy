@@ -1,10 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SelectionService — Node selection + electric current animation
-// Extracted from graph.component.ts (P2 — Étape 3)
+// P4: ElementRefs maps for O(1) lookups
+// P5: CSS transitions for opacity (class toggles), D3 transitions for colors
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Injectable } from "@angular/core";
-import { select, type Selection } from "d3-selection";
+import { type Selection } from "d3-selection";
 import { timer, type Timer } from "d3-timer";
 import { hierarchy, type HierarchyNode } from "d3-hierarchy";
 import { interpolateRgb } from "d3-interpolate";
@@ -14,6 +15,7 @@ import {
   type LayoutMode,
   type HierarchyDatum,
 } from "../models/graph.model";
+import { type ElementRefs } from "../models/element-refs";
 import {
   COLOR_PRIMARY,
   COLOR_TERTIARY,
@@ -34,14 +36,16 @@ export interface SelectionContext {
   selectedNodeId: string | null;
   collapsedBranches: Set<string>;
   buildHierarchy: () => HierarchyDatum;
+  elementRefs: ElementRefs;
 }
 
 @Injectable({ providedIn: "root" })
 export class SelectionService {
   private selectionAnimTimer: Timer | null = null;
 
-  // Transition duration for selection animations (ms)
-  private readonly SELECTION_TRANSITION_MS = 250;
+  // Transition duration for color animations (ms)
+  // Opacity transitions are handled by CSS (250ms ease on .g-node, .g-edge, .g-badge)
+  private readonly COLOR_TRANSITION_MS = 250;
 
   // Electric animation constants
   private readonly ELECTRIC_DASH = "10 4 4 4"; // dasharray pattern
@@ -62,72 +66,48 @@ export class SelectionService {
 
   applyNodeSelection(ctx: SelectionContext): void {
     const {
-      g,
       graphData,
       layoutMode,
       selectedNodeId,
       collapsedBranches,
       buildHierarchy,
+      elementRefs,
     } = ctx;
-    const allNodes = g.selectAll("[data-node-id]");
-    const t = this.SELECTION_TRANSITION_MS;
+    const t = this.COLOR_TRANSITION_MS;
 
     if (!selectedNodeId) {
       // Stop electric current animation and clean up attributes
-      this.stopElectricAnimation(g);
+      this.stopElectricAnimation(ctx.g, elementRefs);
 
-      // Reset all opacity to 1 with transition
-      allNodes.interrupt().transition().duration(t).attr("opacity", 1);
-      g.selectAll(".link-badges g, .edge-labels g")
-        .interrupt()
-        .transition()
-        .duration(t)
-        .attr("opacity", 1);
+      // P5: Opacity reset via CSS class — remove "dimmed" from all elements
+      for (const [, nodeGroup] of elementRefs.nodeGroupMap) {
+        nodeGroup.classed("dimmed", false);
+      }
+      for (const [, pathEl] of elementRefs.edgePathMap) {
+        pathEl.classed("dimmed", false);
+      }
+      for (const [, badgeEl] of elementRefs.badgeGroupMap) {
+        badgeEl.classed("dimmed", false);
+      }
 
-      // Reset link opacity AND stroke colors in a single transition per element
-      g.selectAll(".edges path, .tree-links path").each(function () {
-        const el = select(this);
-        el.classed("electric-current", false);
-        const edgeType = el.attr("data-edge-type");
-        el.interrupt()
-          .transition()
-          .duration(t)
-          .attr("opacity", 1)
-          .attr(
-            "stroke",
-            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
-          );
-      });
-
-      // Reset node colors to default with transition
-      allNodes.each(function () {
-        const nodeGroup = select(this);
-        const nodeId = nodeGroup.attr("data-node-id");
-        if (!nodeId) return;
+      // Reset node colors with D3 transition
+      for (const [nodeId, nodeGroup] of elementRefs.nodeGroupMap) {
         const isCenter = nodeId === graphData.center.id;
-        if (isCenter) return;
+        if (isCenter) continue;
 
-        const realId = nodeGroup.attr("data-real-id") || nodeId;
+        const realId = elementRefs.nodeRealIdMap.get(nodeId) || nodeId;
         const nodeType = graphData.nodes.find((n) => n.id === realId)?.type;
 
         if (nodeType) {
-          const circles = nodeGroup.selectAll("circle");
-          const innerCircle = circles.filter(function () {
-            const r = select(this).attr("r");
-            return r === "30" || r === "22";
-          });
-
-          innerCircle
+          nodeGroup
+            .select("circle.inner-circle")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", NODE_COLORS[nodeType])
             .attr("stroke", NODE_STROKE_COLORS[nodeType]);
-          circles
-            .filter(function () {
-              const r = select(this).attr("r");
-              return r === "34" || r === "26";
-            })
+          nodeGroup
+            .select("circle.halo-circle")
             .interrupt()
             .transition()
             .duration(t)
@@ -166,58 +146,78 @@ export class SelectionService {
             .duration(t)
             .attr("fill", color);
         }
-      });
+      }
 
-      // Reset edge labels to default colors with transition
-      g.selectAll(".edge-labels g").each(function () {
-        const el = select(this);
-        const edgeType = el.attr("data-edge-type");
-        const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-        el.select("rect:first-of-type")
+      // Reset edge stroke colors with D3 transition
+      for (const [key, pathEl] of elementRefs.edgePathMap) {
+        const edgeType = key.split("|")[2] || "LOGISTICS";
+        pathEl
+          .classed("electric-current", false)
           .interrupt()
           .transition()
           .duration(t)
-          .attr("fill", "white");
-        el.select(".label-bg")
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("fill", color)
-          .attr("fill-opacity", "0.15")
-          .attr("stroke", color);
-        el.selectAll("text")
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("fill", color);
-      });
+          .attr(
+            "stroke",
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
+          );
+      }
 
-      // Reset tree link badges to default colors with transition
-      g.selectAll(".link-badges g").each(function () {
-        const badgeG = select(this);
-        const edgeType = badgeG.attr("data-edge-type");
-        const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-        badgeG
-          .select("rect:first-of-type")
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("fill", "white");
-        badgeG
-          .select("rect:last-of-type")
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("fill", color)
-          .attr("fill-opacity", "0.15")
-          .attr("stroke", color);
-        badgeG
-          .select("text")
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("fill", color);
-      });
+      // Reset badge colors with D3 transition
+      if (layoutMode === "force") {
+        for (const [key, badgeEl] of elementRefs.badgeGroupMap) {
+          const edgeType = key.split("|")[2] || "LOGISTICS";
+          const color =
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+          badgeEl
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
+          badgeEl
+            .select(".label-bg")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", color);
+          badgeEl
+            .selectAll("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color);
+        }
+      } else {
+        // Tree / Dendrogram: badges keyed by targetId
+        for (const [targetId, badgeG] of elementRefs.badgeGroupMap) {
+          const edgeType =
+            elementRefs.badgeEdgeTypeMap.get(targetId) || "LOGISTICS";
+          const color =
+            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+          badgeG
+            .select("rect:first-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", "white");
+          badgeG
+            .select("rect:last-of-type")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color)
+            .attr("fill-opacity", "0.15")
+            .attr("stroke", color);
+          badgeG
+            .select("text")
+            .interrupt()
+            .transition()
+            .duration(t)
+            .attr("fill", color);
+        }
+      }
 
       return;
     }
@@ -304,53 +304,46 @@ export class SelectionService {
       });
       highlighted = highlightedTree;
 
-      allNodes
-        .interrupt()
-        .transition()
-        .duration(t)
-        .attr("opacity", function () {
-          const nodeId = select(this).attr("data-node-id");
-          return nodeId && highlighted.has(nodeId) ? 1 : 0.25;
-        });
+      // P5: Nodes — opacity via CSS class
+      for (const [nodeId, nodeGroup] of elementRefs.nodeGroupMap) {
+        nodeGroup.classed("dimmed", !highlighted.has(nodeId));
+      }
 
-      g.selectAll(".tree-links path").each(function () {
-        const el = select(this);
-        const sourceId = el.attr("data-source-id");
-        const targetId = el.attr("data-target-id");
+      // Edges: opacity via CSS class, stroke color via D3
+      for (const [key, pathEl] of elementRefs.edgePathMap) {
+        const parts = key.split("|");
+        const sourceId = parts[0];
+        const targetId = parts[1];
+        const edgeType = parts[2] || "LOGISTICS";
         const connected =
           sourceId &&
           targetId &&
           highlighted.has(sourceId) &&
           highlighted.has(targetId);
-        const edgeType = el.attr("data-edge-type");
 
         if (connected) {
-          el.classed("electric-current", true);
-          el.interrupt().transition().duration(t).attr("opacity", 1);
+          pathEl.classed("dimmed", false).classed("electric-current", true);
         } else {
-          el.classed("electric-current", false);
-          el.interrupt()
+          pathEl
+            .classed("dimmed", true)
+            .classed("electric-current", false)
+            .interrupt()
             .transition()
             .duration(t)
-            .attr("opacity", 0.12)
             .attr(
               "stroke",
               edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
             );
         }
-      });
+      }
 
-      g.selectAll(".link-badges g").each(function () {
-        const badgeG = select(this);
-        const targetId = badgeG.attr("data-target-id");
+      // Badges: opacity via CSS class
+      for (const [targetId, badgeG] of elementRefs.badgeGroupMap) {
         const connected = targetId && highlighted.has(targetId);
         const isOnSelectedPath =
           connected && (ancestors.has(targetId) || descendants.has(targetId));
-        badgeG
-          .interrupt()
-          .transition()
-          .duration(t)
-          .attr("opacity", connected ? 1 : 0.12);
+        badgeG.classed("dimmed", !connected);
+
         if (isOnSelectedPath) {
           badgeG
             .select("rect:first-of-type")
@@ -373,7 +366,8 @@ export class SelectionService {
             .duration(t)
             .attr("fill", COLOR_ELECTRIC);
         } else {
-          const edgeType = badgeG.attr("data-edge-type");
+          const edgeType =
+            elementRefs.badgeEdgeTypeMap.get(targetId) || "LOGISTICS";
           const color =
             edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
           badgeG
@@ -397,7 +391,7 @@ export class SelectionService {
             .duration(t)
             .attr("fill", color);
         }
-      });
+      }
     } else {
       // Force mode: highlight connected edges
       const connectedNodeIds = new Set<string>([selectedId, centerId]);
@@ -408,97 +402,95 @@ export class SelectionService {
         }
       });
 
-      allNodes
-        .interrupt()
-        .transition()
-        .duration(t)
-        .attr("opacity", function () {
-          const nodeId = select(this).attr("data-node-id");
-          return nodeId && connectedNodeIds.has(nodeId) ? 1 : 0.25;
-        });
+      // P5: Nodes — opacity via CSS class
+      for (const [nodeId, nodeGroup] of elementRefs.nodeGroupMap) {
+        nodeGroup.classed("dimmed", !connectedNodeIds.has(nodeId));
+      }
 
-      g.selectAll(".edges path").each(function () {
-        const el = select(this);
-        const sourceId = el.attr("data-source-id");
-        const targetId = el.attr("data-target-id");
+      // Edges: opacity via CSS class, stroke color via D3
+      for (const [key, pathEl] of elementRefs.edgePathMap) {
+        const parts = key.split("|");
+        const sourceId = parts[0];
+        const targetId = parts[1];
+        const edgeType = parts[2] || "LOGISTICS";
         const connected = isConnected(sourceId, targetId);
-        const edgeType = el.attr("data-edge-type");
 
         if (connected) {
-          el.classed("electric-current", true);
-          el.interrupt().transition().duration(t).attr("opacity", 1);
+          pathEl.classed("dimmed", false).classed("electric-current", true);
         } else {
-          el.classed("electric-current", false);
-          el.interrupt()
+          pathEl
+            .classed("dimmed", true)
+            .classed("electric-current", false)
+            .interrupt()
             .transition()
             .duration(t)
-            .attr("opacity", 0.12)
             .attr(
               "stroke",
               edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
             );
         }
-      });
+      }
 
-      g.selectAll(".edge-labels g").each(function () {
-        const el = select(this);
-        const sourceId = el.attr("data-source-id");
-        const targetId = el.attr("data-target-id");
+      // Badges (edge-labels): opacity via CSS class
+      for (const [key, badgeEl] of elementRefs.badgeGroupMap) {
+        const parts = key.split("|");
+        const sourceId = parts[0];
+        const targetId = parts[1];
+        const edgeType = parts[2] || "LOGISTICS";
         const connected = isConnected(sourceId, targetId);
-        el.interrupt()
-          .transition()
-          .duration(t)
-          .attr("opacity", connected ? 1 : 0.12);
+        const color = edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
+
+        badgeEl.classed("dimmed", !connected);
+
         if (connected) {
-          el.select("rect:first-of-type")
+          badgeEl
+            .select("rect:first-of-type")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", "white");
-          el.select(".label-bg")
+          badgeEl
+            .select(".label-bg")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", COLOR_ELECTRIC)
             .attr("fill-opacity", "0.15")
             .attr("stroke", COLOR_ELECTRIC);
-          el.selectAll("text")
+          badgeEl
+            .selectAll("text")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", COLOR_ELECTRIC);
         } else {
-          const edgeType = el.attr("data-edge-type");
-          const color =
-            edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
-          el.select("rect:first-of-type")
+          badgeEl
+            .select("rect:first-of-type")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", "white");
-          el.select(".label-bg")
+          badgeEl
+            .select(".label-bg")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", color)
             .attr("fill-opacity", "0.15")
             .attr("stroke", color);
-          el.selectAll("text")
+          badgeEl
+            .selectAll("text")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", color);
         }
-      });
+      }
     }
 
     // Change colors of selected node to Electric colors with transition
-    allNodes.each(function () {
-      const nodeGroup = select(this);
-      const nodeId = nodeGroup.attr("data-node-id");
-      if (!nodeId) return;
-
-      const realId = nodeGroup.attr("data-real-id") || nodeId;
+    for (const [nodeId, nodeGroup] of elementRefs.nodeGroupMap) {
+      const realId = elementRefs.nodeRealIdMap.get(nodeId) || nodeId;
       const isSelected = realId === selectedId;
       const isCenter = nodeId === centerId;
 
@@ -558,47 +550,39 @@ export class SelectionService {
             .duration(t)
             .attr("fill", branchColor);
         }
-        return; // branch nodes don't have circles
+        continue; // branch nodes don't have circles
       }
 
-      // Find the inner circle (r = NODE_RADIUS)
-      const circles = nodeGroup.selectAll("circle");
-      const innerCircle = circles.filter(function () {
-        const r = select(this).attr("r");
-        return r === "30" || r === "22";
-      });
+      if (isCenter) continue;
 
-      if (isSelected && !isCenter) {
-        innerCircle
+      // Leaf nodes: inner-circle and halo-circle
+      if (isSelected) {
+        nodeGroup
+          .select("circle.inner-circle")
           .interrupt()
           .transition()
           .duration(t)
           .attr("fill", COLOR_ELECTRIC_CONTAINER)
           .attr("stroke", COLOR_ELECTRIC);
-        circles
-          .filter(function () {
-            const r = select(this).attr("r");
-            return r === "34" || r === "26";
-          })
+        nodeGroup
+          .select("circle.halo-circle")
           .interrupt()
           .transition()
           .duration(t)
           .attr("stroke", COLOR_ELECTRIC)
           .attr("stroke-opacity", 0.4);
-      } else if (!isCenter) {
+      } else {
         const nodeType = graphData.nodes.find((n) => n.id === realId)?.type;
         if (nodeType) {
-          innerCircle
+          nodeGroup
+            .select("circle.inner-circle")
             .interrupt()
             .transition()
             .duration(t)
             .attr("fill", NODE_COLORS[nodeType])
             .attr("stroke", NODE_STROKE_COLORS[nodeType]);
-          circles
-            .filter(function () {
-              const r = select(this).attr("r");
-              return r === "34" || r === "26";
-            })
+          nodeGroup
+            .select("circle.halo-circle")
             .interrupt()
             .transition()
             .duration(t)
@@ -606,29 +590,38 @@ export class SelectionService {
             .attr("stroke-opacity", 0.4);
         }
       }
-    });
+    }
 
     // Start electric current animation on selected link paths
-    this.startElectricAnimation(g);
+    this.startElectricAnimation(ctx.g, elementRefs);
   }
 
   startElectricAnimation(
     g: Selection<SVGGElement, unknown, null, undefined>,
+    elementRefs: ElementRefs,
   ): void {
-    this.stopElectricAnimation(g);
+    this.stopElectricAnimation(g, elementRefs);
 
-    const animatedPaths = g
-      .selectAll(".edges path, .tree-links path")
-      .filter(function () {
-        return select(this).classed("electric-current");
-      });
+    // Collect electric-current paths from the edgePathMap
+    const electricPaths: Selection<SVGPathElement, unknown, null, undefined>[] =
+      [];
+    for (const [, pathEl] of elementRefs.edgePathMap) {
+      if (pathEl.classed("electric-current")) {
+        electricPaths.push(pathEl);
+      }
+    }
 
-    if (animatedPaths.empty()) return;
+    if (electricPaths.length === 0) return;
 
-    animatedPaths
-      .attr("stroke-dasharray", this.ELECTRIC_DASH)
-      .attr("stroke-linecap", "round")
-      .attr("filter", "url(#electric-glow)");
+    // Store references for the animation timer
+    elementRefs.electricPaths.push(...electricPaths);
+
+    for (const pathEl of electricPaths) {
+      pathEl
+        .attr("stroke-dasharray", this.ELECTRIC_DASH)
+        .attr("stroke-linecap", "round")
+        .attr("filter", "url(#electric-glow)");
+    }
 
     const period = this.ELECTRIC_DASH_PERIOD;
     const flowMs = this.ELECTRIC_FLOW_DURATION;
@@ -651,28 +644,34 @@ export class SelectionService {
       const color = colors[colorIndex];
       const strokeOpacity = 1 - 0.3 * colorT;
 
-      animatedPaths
-        .attr("stroke-dashoffset", dashOffset)
-        .attr("stroke", color)
-        .attr("stroke-opacity", strokeOpacity);
+      for (const pathEl of electricPaths) {
+        pathEl
+          .attr("stroke-dashoffset", dashOffset)
+          .attr("stroke", color)
+          .attr("stroke-opacity", strokeOpacity);
+      }
     });
   }
 
   stopElectricAnimation(
     g: Selection<SVGGElement, unknown, null, undefined> | null,
+    elementRefs: ElementRefs,
   ): void {
     if (this.selectionAnimTimer) {
       this.selectionAnimTimer.stop();
       this.selectionAnimTimer = null;
     }
-    if (!g) return;
 
-    g.selectAll(".edges path, .tree-links path")
-      .attr("stroke-dasharray", null)
-      .attr("stroke-dashoffset", null)
-      .attr("stroke-linecap", null)
-      .attr("filter", null)
-      .attr("stroke-opacity", null);
+    // Clean up electric-current attributes using stored references
+    for (const pathEl of elementRefs.electricPaths) {
+      pathEl
+        .attr("stroke-dasharray", null)
+        .attr("stroke-dashoffset", null)
+        .attr("stroke-linecap", null)
+        .attr("filter", null)
+        .attr("stroke-opacity", null);
+    }
+    elementRefs.electricPaths.length = 0;
   }
 
   /** Stop timer without touching SVG (for ngOnDestroy) */

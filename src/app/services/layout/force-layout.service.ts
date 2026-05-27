@@ -23,6 +23,7 @@ import {
   type SimNode,
   type SimLink,
 } from "../../models/graph.model";
+import { ElementRefs } from "../../models/element-refs";
 import { SvgBuilderService } from "../svg-builder.service";
 import {
   COLOR_TERTIARY,
@@ -38,6 +39,10 @@ import {
   NODE_LABELS,
   LINK_DISTANCE,
 } from "../../models/colors";
+import {
+  computeCenteredTagRect,
+  computeCenteredBadgeRect,
+} from "../../models/text-measurer";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Render context — everything the service needs from the component
@@ -51,6 +56,7 @@ export interface ForceRenderContext {
   containerEl: HTMLDivElement;
   savedPositions: Map<string, { x: number; y: number }>;
   selectedNodeId: string | null;
+  elementRefs: ElementRefs;
   onNodeSelect: (nodeId: string | null) => void;
   onApplyNodeSelection: () => void;
 }
@@ -182,6 +188,7 @@ export class ForceLayoutService {
       .data(simNodes.filter((n) => n.id !== graphData.center.id))
       .enter()
       .append("g")
+      .attr("class", "g-node")
       .attr("data-node-id", (d) => d.id)
       .attr("cursor", "pointer")
       .call(
@@ -222,7 +229,7 @@ export class ForceLayoutService {
     const centerNodeEl = centerNode
       ? g
           .append("g")
-          .attr("class", "center-node")
+          .attr("class", "center-node g-node")
           .attr("data-node-id", centerNode.id)
           .datum(centerNode)
           .attr("transform", `translate(${centerNode.x},${centerNode.y})`)
@@ -236,26 +243,41 @@ export class ForceLayoutService {
       );
     }
 
-    // ── Hover interactions ──
-    if (centerNodeEl) {
-      this.addCenterHover(
-        centerNodeEl as Selection<SVGGElement, SimNode, BaseType, unknown>,
-        neighborNodes,
-        edgePaths,
-        edgeLabels,
-        simLinks,
-        graphData.center.id,
-        selectedNodeId,
-        ctx.onApplyNodeSelection,
-      );
+    // ── Populate ElementRefs ──
+    ctx.elementRefs.clear();
+    neighborNodes.each(function (this: SVGGElement, d: SimNode) {
+      ctx.elementRefs.nodeGroupMap.set(d.id, select(this));
+      ctx.elementRefs.nodeRealIdMap.set(d.id, d.id);
+    });
+    if (centerNodeEl && centerNode) {
+      const centerEl = centerNodeEl.node();
+      if (centerEl) {
+        ctx.elementRefs.nodeGroupMap.set(centerNode.id, select(centerEl));
+        ctx.elementRefs.nodeRealIdMap.set(centerNode.id, centerNode.id);
+      }
     }
+    edgePaths.each(function (this: SVGPathElement, d: SimLink) {
+      const key = `${d.sourceId}|${d.targetId}|${d.edgeType}`;
+      ctx.elementRefs.edgePathMap.set(key, select(this));
+    });
+    edgeLabels.each(function (this: SVGGElement, d: SimLink) {
+      const key = `${d.sourceId}|${d.targetId}|${d.edgeType}`;
+      ctx.elementRefs.badgeGroupMap.set(key, select(this));
+      ctx.elementRefs.badgeEdgeTypeMap.set(key, d.edgeType);
+    });
+
+    // ── Hover interactions ──
+    this.addCenterHover(
+      ctx.elementRefs,
+      simLinks,
+      graphData.center.id,
+      selectedNodeId,
+      ctx.onApplyNodeSelection,
+    );
 
     this.addNeighborHover(
-      neighborNodes,
-      edgePaths,
-      edgeLabels,
+      ctx.elementRefs,
       simLinks,
-      centerNodeEl,
       graphData.center.id,
       selectedNodeId,
       ctx.onApplyNodeSelection,
@@ -342,13 +364,11 @@ export class ForceLayoutService {
       return null;
     }
 
-    // ── 2. Read current node positions from DOM ──
+    // ── 2. Read current node positions from ElementRefs ──
     const positions = new Map<string, { x: number; y: number }>();
-    g.selectAll("[data-node-id]").each(function () {
-      const el = select(this);
-      const nodeId = el.attr("data-node-id");
-      const transform = el.attr("transform");
-      if (nodeId && transform) {
+    ctx.elementRefs.nodeGroupMap.forEach((nodeGroup, nodeId) => {
+      const transform = nodeGroup.attr("transform");
+      if (transform) {
         const match = transform.match(
           /translate\(\s*([^,\s]+)[\s,]+([^)\s]+)\s*\)/,
         );
@@ -463,6 +483,7 @@ export class ForceLayoutService {
     const nodeEnter = nodeJoin
       .enter()
       .append("g")
+      .attr("class", "g-node")
       .attr("data-node-id", (d) => d.id)
       .attr("cursor", "pointer");
     this.drawNodeCircles(
@@ -479,6 +500,7 @@ export class ForceLayoutService {
     const edgeEnter = edgeJoin
       .enter()
       .append("path")
+      .attr("class", "g-edge")
       .attr("fill", "none")
       .attr("stroke", (d: SimLink) =>
         d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
@@ -520,7 +542,7 @@ export class ForceLayoutService {
     const labelEnter = labelJoin
       .enter()
       .append("g")
-      .attr("class", "edge-label")
+      .attr("class", "edge-label g-badge")
       .attr("data-source-id", (d: SimLink) => d.sourceId)
       .attr("data-target-id", (d: SimLink) => d.targetId)
       .attr("data-edge-type", (d: SimLink) => d.edgeType);
@@ -625,60 +647,55 @@ export class ForceLayoutService {
         }),
     );
 
-    // ── 13. Apply hover and click handlers ──
-    // Cast selections to match the types expected by helper methods.
-    // g.select() returns BaseType, and data joins produce BaseType parent;
-    // helpers expect SVGGElement parent. Use double cast via unknown.
-    const typedNeighborNodes = allNeighborNodes as unknown as Selection<
-      SVGGElement,
-      SimNode,
-      SVGGElement,
-      unknown
-    >;
+    // ── Rebuild ElementRefs ──
+    ctx.elementRefs.clear();
+    allNeighborNodes.each(function (this: SVGGElement, d: SimNode) {
+      ctx.elementRefs.nodeGroupMap.set(d.id, select(this));
+      ctx.elementRefs.nodeRealIdMap.set(d.id, d.id);
+    });
+    if (!centerNodeEl.empty() && centerNode) {
+      const centerEl = centerNodeEl.node();
+      if (centerEl) {
+        ctx.elementRefs.nodeGroupMap.set(centerNode.id, select(centerEl));
+        ctx.elementRefs.nodeRealIdMap.set(centerNode.id, centerNode.id);
+      }
+    }
+    allEdgePaths.each(function (this: SVGPathElement, d: SimLink) {
+      const key = `${d.sourceId}|${d.targetId}|${d.edgeType}`;
+      ctx.elementRefs.edgePathMap.set(key, select(this));
+    });
+    allEdgeLabels.each(function (this: SVGGElement, d: SimLink) {
+      const key = `${d.sourceId}|${d.targetId}|${d.edgeType}`;
+      ctx.elementRefs.badgeGroupMap.set(key, select(this));
+      ctx.elementRefs.badgeEdgeTypeMap.set(key, d.edgeType);
+    });
+
+    // Cast selection to match the type expected by addEdgeTooltip.
+    // g.select() returns BaseType; helper expects SVGGElement parent. Double cast via unknown.
     const typedEdgePaths = allEdgePaths as unknown as Selection<
       SVGPathElement,
       SimLink,
       SVGGElement,
       unknown
     >;
-    const typedEdgeLabels = allEdgeLabels as unknown as Selection<
-      SVGGElement,
-      SimLink,
-      SVGGElement,
-      unknown
-    >;
-    const typedCenterNodeEl = centerNodeEl as unknown as Selection<
-      SVGGElement,
-      SimNode,
-      BaseType,
-      unknown
-    >;
 
     this.addEdgeTooltip(typedEdgePaths, linkLabelsGroup, simLinks);
 
     this.addNeighborHover(
-      typedNeighborNodes,
-      typedEdgePaths,
-      typedEdgeLabels,
+      ctx.elementRefs,
       simLinks,
-      centerNodeEl.empty() ? null : typedCenterNodeEl,
       graphData.center.id,
       selectedNodeId,
       ctx.onApplyNodeSelection,
     );
 
-    if (!centerNodeEl.empty()) {
-      this.addCenterHover(
-        typedCenterNodeEl,
-        typedNeighborNodes,
-        typedEdgePaths,
-        typedEdgeLabels,
-        simLinks,
-        graphData.center.id,
-        selectedNodeId,
-        ctx.onApplyNodeSelection,
-      );
-    }
+    this.addCenterHover(
+      ctx.elementRefs,
+      simLinks,
+      graphData.center.id,
+      selectedNodeId,
+      ctx.onApplyNodeSelection,
+    );
 
     allNeighborNodes.on("click", (_event: MouseEvent, d: SimNode) => {
       if (d.type === "R1" || d.type === "R2") {
@@ -767,6 +784,7 @@ export class ForceLayoutService {
     if (isCenter) {
       selection
         .append("circle")
+        .attr("class", "inner-circle")
         .attr("r", NODE_RADIUS.SITE)
         .attr("fill", NODE_COLORS.SITE)
         .attr("stroke", COLOR_ELECTRIC)
@@ -796,6 +814,7 @@ export class ForceLayoutService {
     } else {
       selection
         .append("circle")
+        .attr("class", "halo-circle")
         .attr("r", (d: SimNode) => NODE_RADIUS[d.type] + 4)
         .attr("fill", "none")
         .attr("stroke", (d: SimNode) => NODE_STROKE_COLORS[d.type])
@@ -804,6 +823,7 @@ export class ForceLayoutService {
 
       selection
         .append("circle")
+        .attr("class", "inner-circle")
         .attr("r", (d: SimNode) => NODE_RADIUS[d.type])
         .attr("fill", (d: SimNode) => NODE_COLORS[d.type])
         .attr("stroke", (d: SimNode) => NODE_STROKE_COLORS[d.type])
@@ -857,18 +877,25 @@ export class ForceLayoutService {
         .attr("fill", (d: SimNode) => NODE_STROKE_COLORS[d.type])
         .attr("pointer-events", "none");
 
-      r1WithSigmpr.each(function (d: SimNode, i: number) {
+      // P10: Pre-computed SIGMPR tag dimensions (replaces getBBox)
+      r1WithSigmpr.each(function (d: SimNode) {
         if (!d.sigmpr) return;
-        const textEl = sigmprTextEls.nodes()[i] as SVGTextElement;
-        if (textEl) {
-          const bbox = textEl.getBBox();
-          select(this)
-            .selectAll("rect")
-            .attr("x", bbox.x - 3)
-            .attr("y", bbox.y - 1.5)
-            .attr("width", bbox.width + 6)
-            .attr("height", bbox.height + 3);
-        }
+        const tagText = `SIGMPR:${d.sigmpr}`;
+        const rect = computeCenteredTagRect(
+          tagText,
+          7,
+          "700",
+          0,
+          NODE_RADIUS[d.type] + 32,
+          3,
+          1.5,
+        );
+        select(this)
+          .selectAll("rect")
+          .attr("x", rect.x)
+          .attr("y", rect.y)
+          .attr("width", rect.width)
+          .attr("height", rect.height);
       });
     }
   }
@@ -886,6 +913,7 @@ export class ForceLayoutService {
       .data(simLinks)
       .enter()
       .append("path")
+      .attr("class", "g-edge")
       .attr("fill", "none")
       .attr("stroke", (d: SimLink) =>
         d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY,
@@ -912,7 +940,7 @@ export class ForceLayoutService {
       .data(simLinks)
       .enter()
       .append("g")
-      .attr("class", "edge-label")
+      .attr("class", "edge-label g-badge")
       .attr("data-source-id", (d: SimLink) => d.sourceId)
       .attr("data-target-id", (d: SimLink) => d.targetId)
       .attr("data-edge-type", (d: SimLink) => d.edgeType);
@@ -1012,100 +1040,103 @@ export class ForceLayoutService {
   // ─────────────────────────────────────────────────────────────────────────
 
   private addNeighborHover(
-    neighborNodes: Selection<SVGGElement, SimNode, SVGGElement, unknown>,
-    edgePaths: Selection<SVGPathElement, SimLink, SVGGElement, unknown>,
-    edgeLabels: Selection<SVGGElement, SimLink, SVGGElement, unknown>,
+    elementRefs: ElementRefs,
     simLinks: SimLink[],
-    centerNodeEl: Selection<SVGGElement, SimNode, BaseType, unknown> | null,
     centerId: string,
     selectedNodeId: string | null,
     onApplyNodeSelection: () => void,
   ): void {
-    neighborNodes
-      .on("mouseenter", (_event: MouseEvent, d: SimNode) => {
+    const { nodeGroupMap, edgePathMap, badgeGroupMap } = elementRefs;
+
+    nodeGroupMap.forEach((el, nodeId) => {
+      if (nodeId === centerId) return; // center hover is handled separately
+
+      el.on("mouseenter", () => {
         const linkedEdgeIds = new Set(
-          simLinks.filter((l) => l.sourceId === d.id || l.targetId === d.id),
+          simLinks.filter(
+            (l) => l.sourceId === nodeId || l.targetId === nodeId,
+          ),
         );
 
         // Interrupt any ongoing selection transitions before applying hover
-        neighborNodes.interrupt();
-        edgePaths.interrupt();
-        edgeLabels.interrupt();
-        if (centerNodeEl) centerNodeEl.interrupt();
+        nodeGroupMap.forEach((n) => n.interrupt());
+        edgePathMap.forEach((e) => e.interrupt());
+        badgeGroupMap.forEach((l) => l.interrupt());
 
-        neighborNodes.attr("opacity", (n: SimNode) =>
-          n.id === d.id || linkedEdgeIds.size === 0 ? 1 : 0.25,
+        nodeGroupMap.forEach((nEl, nId) =>
+          nEl.classed("dimmed", nId !== nodeId && linkedEdgeIds.size > 0),
         );
-        if (centerNodeEl)
-          centerNodeEl.attr("opacity", d.id === centerId ? 1 : 0.25);
+        const centerEl = nodeGroupMap.get(centerId);
+        if (centerEl) centerEl.classed("dimmed", nodeId !== centerId);
 
-        edgePaths.attr("opacity", (l: SimLink) =>
-          l.sourceId === d.id || l.targetId === d.id ? 1 : 0.12,
-        );
+        edgePathMap.forEach((pathEl, key) => {
+          const [sourceId, targetId] = key.split("|");
+          pathEl.classed("dimmed", sourceId !== nodeId && targetId !== nodeId);
+        });
 
-        edgeLabels.attr("opacity", (l: SimLink) =>
-          l.sourceId === d.id || l.targetId === d.id ? 1 : 0.12,
-        );
-      })
-      .on("mouseleave", () => {
+        badgeGroupMap.forEach((labelEl, key) => {
+          const [sourceId, targetId] = key.split("|");
+          labelEl.classed("dimmed", sourceId !== nodeId && targetId !== nodeId);
+        });
+      }).on("mouseleave", () => {
         if (selectedNodeId) {
           onApplyNodeSelection();
         } else {
-          // Interrupt any transitions before resetting
-          neighborNodes.interrupt();
-          edgePaths.interrupt();
-          edgeLabels.interrupt();
-          if (centerNodeEl) centerNodeEl.interrupt();
-
-          neighborNodes.attr("opacity", 1);
-          if (centerNodeEl) centerNodeEl.attr("opacity", 1);
-          edgePaths.attr("opacity", 1);
-          edgeLabels.attr("opacity", 1);
+          // Reset all dimmed states — CSS transition handles the animation
+          nodeGroupMap.forEach((nEl) => nEl.classed("dimmed", false));
+          edgePathMap.forEach((pathEl) => pathEl.classed("dimmed", false));
+          badgeGroupMap.forEach((labelEl) => labelEl.classed("dimmed", false));
         }
       });
+    });
   }
 
   private addCenterHover(
-    centerNodeEl: Selection<SVGGElement, SimNode, BaseType, unknown>,
-    neighborNodes: Selection<SVGGElement, SimNode, SVGGElement, unknown>,
-    edgePaths: Selection<SVGPathElement, SimLink, SVGGElement, unknown>,
-    edgeLabels: Selection<SVGGElement, SimLink, SVGGElement, unknown>,
+    elementRefs: ElementRefs,
     simLinks: SimLink[],
     centerId: string,
     selectedNodeId: string | null,
     onApplyNodeSelection: () => void,
   ): void {
+    const { nodeGroupMap, edgePathMap, badgeGroupMap } = elementRefs;
+    const centerNodeEl = nodeGroupMap.get(centerId);
+    if (!centerNodeEl) return;
+
     centerNodeEl
       .on("mouseenter", () => {
         // Interrupt any ongoing selection transitions before applying hover
-        neighborNodes.interrupt();
-        edgePaths.interrupt();
-        edgeLabels.interrupt();
-        centerNodeEl.interrupt();
+        nodeGroupMap.forEach((n) => n.interrupt());
+        edgePathMap.forEach((e) => e.interrupt());
+        badgeGroupMap.forEach((l) => l.interrupt());
 
-        neighborNodes.attr("opacity", 0.25);
-        centerNodeEl.attr("opacity", 1);
-        edgePaths.attr("opacity", (l: SimLink) =>
-          l.sourceId === centerId || l.targetId === centerId ? 1 : 0.12,
+        nodeGroupMap.forEach((nEl, nId) =>
+          nEl.classed("dimmed", nId !== centerId),
         );
-        edgeLabels.attr("opacity", (l: SimLink) =>
-          l.sourceId === centerId || l.targetId === centerId ? 1 : 0.12,
-        );
+
+        edgePathMap.forEach((pathEl, key) => {
+          const [sourceId, targetId] = key.split("|");
+          pathEl.classed(
+            "dimmed",
+            sourceId !== centerId && targetId !== centerId,
+          );
+        });
+
+        badgeGroupMap.forEach((labelEl, key) => {
+          const [sourceId, targetId] = key.split("|");
+          labelEl.classed(
+            "dimmed",
+            sourceId !== centerId && targetId !== centerId,
+          );
+        });
       })
       .on("mouseleave", () => {
         if (selectedNodeId) {
           onApplyNodeSelection();
         } else {
-          // Interrupt any transitions before resetting
-          neighborNodes.interrupt();
-          edgePaths.interrupt();
-          edgeLabels.interrupt();
-          centerNodeEl.interrupt();
-
-          neighborNodes.attr("opacity", 1);
-          centerNodeEl.attr("opacity", 1);
-          edgePaths.attr("opacity", 1);
-          edgeLabels.attr("opacity", 1);
+          // Reset all dimmed states — CSS transition handles the animation
+          nodeGroupMap.forEach((nEl) => nEl.classed("dimmed", false));
+          edgePathMap.forEach((pathEl) => pathEl.classed("dimmed", false));
+          badgeGroupMap.forEach((labelEl) => labelEl.classed("dimmed", false));
         }
       });
   }
@@ -1223,23 +1254,20 @@ export class ForceLayoutService {
       const my = (sy + ty) / 2 + py * parallelOffset;
 
       const el = select(this);
-      const textEl = el
-        .select("text:not(.label-dmsid)")
-        .node() as SVGTextElement;
+
+      // P10: Pre-computed badge dimensions (replaces getBBox on every tick)
+      const badgeText =
+        d.edgeType === "ANIMATION" ? "A" : d.dmsId ? `DMS:${d.dmsId}` : "L";
+      const badgeRect = computeCenteredBadgeRect(badgeText, 10, "700", 4, 2);
 
       el.select("text:not(.label-dmsid)").attr("x", mx).attr("y", my);
       el.select(".label-dmsid").attr("x", mx).attr("y", my);
 
-      if (textEl) {
-        const bbox = textEl.getBBox();
-        el.selectAll("rect")
-          .attr("x", String(bbox.x - 4))
-          .attr("y", String(bbox.y - 2))
-          .attr("width", String(bbox.width + 8))
-          .attr("height", String(bbox.height + 4));
-      } else {
-        el.selectAll("rect").attr("x", mx).attr("y", my);
-      }
+      el.selectAll("rect")
+        .attr("x", String(badgeRect.x))
+        .attr("y", String(badgeRect.y))
+        .attr("width", String(badgeRect.width))
+        .attr("height", String(badgeRect.height));
 
       const color = d.edgeType === "ANIMATION" ? COLOR_TERTIARY : COLOR_PRIMARY;
 

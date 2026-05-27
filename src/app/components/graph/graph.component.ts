@@ -15,7 +15,7 @@ import { CommonModule } from "@angular/common";
 import "d3-transition"; // side-effect: patches Selection prototype with .transition()
 import { type Simulation } from "d3-force";
 import { hierarchy } from "d3-hierarchy";
-import { select, type Selection } from "d3-selection";
+import { type Selection } from "d3-selection";
 import { type ZoomBehavior } from "d3-zoom";
 
 import {
@@ -25,6 +25,7 @@ import {
   SimLink,
   HierarchyDatum,
 } from "../../models/graph.model";
+import { ElementRefs } from "../../models/element-refs";
 import { SvgBuilderService } from "../../services/svg-builder.service";
 import { SelectionService } from "../../services/selection.service";
 import { ForceLayoutService } from "../../services/layout/force-layout.service";
@@ -73,6 +74,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
   private cachedHierarchy: HierarchyDatum | null = null;
   private cachedHierarchyKey: string | null = null;
 
+  // P4: Element reference maps for O(1) lookups
+  private readonly elementRefs = new ElementRefs();
+
   constructor(
     private cdr: ChangeDetectorRef,
     private svgBuilder: SvgBuilderService,
@@ -92,6 +96,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       selectedNodeId: this.selectedNodeId,
       collapsedBranches: this.collapsedBranches,
       buildHierarchy: () => this.buildHierarchy(),
+      elementRefs: this.elementRefs,
     };
   }
 
@@ -116,7 +121,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       }
     } else if (changes["layoutMode"]) {
       // Layout changed → smooth transition
-      this.selectionService.stopElectricAnimation(this.g);
+      this.selectionService.stopElectricAnimation(this.g, this.elementRefs);
       this.saveNodePositions();
       this.stopSimulation();
       this.renderGraph();
@@ -129,7 +134,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         this.applyNodeSelection();
       } else {
         this.selectedNodeId = null;
-        this.selectionService.stopElectricAnimation(this.g);
+        this.selectionService.stopElectricAnimation(this.g, this.elementRefs);
         this.applyNodeSelection();
       }
     }
@@ -147,6 +152,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
     this.cachedHierarchy = null;
     this.cachedHierarchyKey = null;
     this.selectedNodeId = null;
+    this.elementRefs.clear();
     this.renderGraph();
     // SIGMPR search selection is handled in ngOnChanges() after this method
   }
@@ -154,7 +160,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
   private incrementalUpdate(): void {
     if (!this.graphData || !this.svg || !this.g || !this.zoomBehavior) return;
 
-    this.selectionService.stopElectricAnimation(this.g);
+    this.selectionService.stopElectricAnimation(this.g, this.elementRefs);
     this.stopSimulation();
 
     // Invalidate hierarchy cache (data changed)
@@ -194,6 +200,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       containerEl: this.container.nativeElement,
       savedPositions: this.savedPositions,
       selectedNodeId: this.selectedNodeId,
+      elementRefs: this.elementRefs,
       onNodeSelect: (nodeId) => {
         this.selectedNodeId = this.selectedNodeId === nodeId ? null : nodeId;
         this.applyNodeSelection();
@@ -227,12 +234,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
     if (!this.g) return;
 
     const positions = new Map<string, { x: number; y: number }>();
-    this.g!.selectAll("[data-node-id]").each(function () {
-      const el = select(this);
-      const nodeId = el.attr("data-node-id");
-      const realId = el.attr("data-real-id");
-      const transform = el.attr("transform");
-      if (nodeId && transform) {
+    this.elementRefs.nodeGroupMap.forEach((nodeGroup, nodeId) => {
+      const transform = nodeGroup.attr("transform");
+      if (transform) {
         const match = transform.match(
           /translate\(\s*([^,\s]+)[\s,]+([^)\s]+)\s*\)/,
         );
@@ -243,6 +247,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
             positions.set(nodeId, { x, y });
             // Also save by real ID so positions survive layout mode switches
             // (Force mode uses real IDs, Tree/Dendrogram use composite IDs)
+            const realId = this.elementRefs.nodeRealIdMap.get(nodeId);
             if (realId && realId !== nodeId) {
               positions.set(realId, { x, y });
             }
@@ -402,6 +407,9 @@ export class GraphComponent implements OnChanges, OnDestroy {
       this.svgBuilder.initSvg(this.container.nativeElement);
     }
 
+    // Clear element refs before re-render (new DOM elements)
+    this.elementRefs.clear();
+
     // Update SVG dimensions
     const containerEl = this.container.nativeElement;
     this.svg!.attr("width", containerEl.clientWidth).attr(
@@ -452,6 +460,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
       containerEl: this.container.nativeElement,
       savedPositions: this.savedPositions,
       selectedNodeId: this.selectedNodeId,
+      elementRefs: this.elementRefs,
       onNodeSelect: (nodeId) => {
         this.selectedNodeId = this.selectedNodeId === nodeId ? null : nodeId;
         this.applyNodeSelection();
@@ -477,6 +486,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         savedPositions: this.savedPositions,
         selectedNodeId: this.selectedNodeId,
         collapsedBranches: this.collapsedBranches,
+        elementRefs: this.elementRefs,
         onNodeSelect: (nodeId) => {
           this.selectedNodeId = this.selectedNodeId === nodeId ? null : nodeId;
           this.applyNodeSelection();
@@ -510,6 +520,7 @@ export class GraphComponent implements OnChanges, OnDestroy {
         savedPositions: this.savedPositions,
         selectedNodeId: this.selectedNodeId,
         collapsedBranches: this.collapsedBranches,
+        elementRefs: this.elementRefs,
         onNodeSelect: (nodeId) => {
           this.selectedNodeId = this.selectedNodeId === nodeId ? null : nodeId;
           this.applyNodeSelection();

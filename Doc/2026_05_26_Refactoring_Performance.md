@@ -42,9 +42,10 @@
 | **Bundle JS** (D3 seul) | ~500 KB | ~100-120 KB | ~100-120 KB |
 | **Temps rendu initial** (50 liens) | ~200 ms | ~120 ms | **~80 ms** |
 | **Temps changement filtre** | Recréation totale | Incrémental -60% | **-80%** |
-| **CPU hover/sélection** | 570 lignes DOM queries | Références directes | **CSS transitions → 0 JS/frame** |
+| **CPU hover/sélection** | 570 lignes DOM queries | Références directes O(1) | CSS transitions → 0 JS/frame pour opacity |
 | **CPU animation électrique** | 60 fps, interpolateRgb/frame | 30 fps, couleurs pré-calculées | **-50%** |
-| **Lignes graph.component.ts** | 3 316 | ~1 500 | **~800** |
+| **Lignes graph.component.ts** | 3 316 | ~1 500 | **~540** |
+| **Lignes selection.service.ts** | ~570 | ~685 (P4 Maps) | **~690** (P5 CSS classes) |
 
 ---
 
@@ -168,84 +169,56 @@ src/app/
 
 ---
 
-### P4 — Références directes vs DOM queries
+### P4 — Références directes vs DOM queries ✅ TERMINÉ
 
 | Champ | Détail |
 |---|---|
 | **Priorité** | 🟠 Élevé |
 | **Effort** | Moyen |
-| **Impact** | Hover/sélection -40% CPU |
-| **Fichier** | `graph.component.ts` → `SelectionService` |
-| **Statut** | ⬜ Non commencé |
+| **Impact** | Hover/sélection O(1) au lieu de O(n), 0 DOM traversal |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-27 → 2026-05-28 |
 
-**Problème :** `applyNodeSelection()` (570 lignes) utilise des sélecteurs DOM pour identifier les éléments :
+**Étapes implémentées :**
 
-```typescript
-// Requêtes coûteuses répétées
-g.selectAll("[data-node-id]")
-g.selectAll(".edges path, .tree-links path")
-g.selectAll(".link-badges g, .edge-labels g")
-const r = d3.select(this).attr("r");  // Identification par rayon de cercle !
-```
+1. **Étape 1 — Classes CSS `.inner-circle` / `.halo-circle`** : Remplacement de l'identification par rayon (`attr("r") === "30"`) par des classes CSS
+2. **Étape 2 — Maps `ElementRefs`** : `nodeGroupMap`, `edgePathMap`, `badgeGroupMap`, `electricPaths`, `nodeRealIdMap`, `badgeEdgeTypeMap`
+3. **Étape 3 — Réécriture `SelectionService`** : Zéro `selectAll`, zéro `each(function)`, tout via Maps O(1)
+4. **Étape 4 — Nettoyage `data-*` attributes** : `attr("data-real-id")` → `nodeRealIdMap`, `attr("data-edge-type")` → `badgeEdgeTypeMap`, `saveNodePositions()` via Maps, tick handler via Maps
+5. **Hover handlers** : `addNeighborHover`, `addCenterHover`, `addHoverInteractions` réécrits avec Maps
 
-**Solution :** Maintenir des Maps de références :
+**Fichiers modifiés :** `element-refs.ts` (nouveau), `selection.service.ts`, `force-layout.service.ts`, `hierarchy-layout.service.ts`, `graph.component.ts`
 
-```typescript
-private nodeGroupMap = new Map<string, d3.Selection<SVGGElement, any, any, any>>();
-private edgePathMap = new Map<string, d3.Selection<SVGPathElement, any, any, any>>();
-private badgeGroupMap = new Map<string, d3.Selection<SVGGElement, any, any, any>>();
-```
-
-Accès O(1) au lieu de traversées DOM :
-
-```typescript
-// Avant : O(n) DOM query
-g.selectAll("[data-node-id]").each(function() { ... });
-
-// Après : O(1) Map lookup
-const nodeGroup = this.nodeGroupMap.get(selectedId);
-nodeGroup.select("circle.inner").attr("fill", COLOR_ELECTRIC_CONTAINER);
-```
-
-**Dépendances :** P2 (les Maps seront dans les services dédiés).
+**Voir :** `Doc/2026_05_27_Modifications_P4.md`
 
 ---
 
-### P5 — Transitions CSS au lieu de D3 transitions inline
+### P5 — Transitions CSS vs D3 inline ✅ TERMINÉ
 
 | Champ | Détail |
 |---|---|
 | **Priorité** | 🟠 Élevé |
 | **Effort** | Moyen |
-| **Impact** | Hover 0 JS/frame, suppression ~300 lignes |
-| **Fichiers** | `graph.component.ts` → `SelectionService`, `graph.component.scss` |
-| **Statut** | ⬜ Non commencé |
+| **Impact** | Opacity : 0 JS/frame (CSS), couleurs : D3 inline conservé |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-28 |
 
-**Problème :** Toutes les transitions de sélection/hover sont gérées par des `.interrupt().transition().duration(t).attr()` D3 inline, ce qui coûte du JS par frame et représente ~300 lignes de code.
+**Approche hybride (Approche A) :**
 
-**Solution :** Remplacer par des classes CSS + `transition` natif :
+| Propriété | Méthode | Justification |
+|---|---|---|
+| `opacity` | CSS class `.dimmed` + `transition: opacity 250ms ease` | Bien supporté en SVG, 0 JS/frame |
+| `fill`, `stroke` | D3 `.transition().duration(250)` | Pas fiable en CSS SVG cross-browser |
+| Animation électrique | JS (d3.timer, 30fps) | Continue et dynamique |
 
-```scss
-// graph.component.scss
-.graph-node { transition: opacity 250ms ease, fill 250ms ease, stroke 250ms ease; }
-.graph-node.dimmed { opacity: 0.25; }
-.graph-node.selected .inner-circle { fill: var(--electric-container); stroke: var(--electric); }
-.graph-link { transition: opacity 250ms ease, stroke 250ms ease; }
-.graph-link.dimmed { opacity: 0.25; }
-.graph-link.electric { stroke-dasharray: 10 4 4 4; filter: url(#electric-glow); }
-```
+**Classes CSS ajoutées :** `.g-node`, `.g-edge`, `.g-badge` avec `transition: opacity 250ms ease`
 
-```typescript
-// Avant : 570 lignes de transitions D3 inline
-el.interrupt().transition().duration(t).attr("opacity", 0.25).attr("stroke", color);
+**Changements principaux :**
+- `SelectionService.applyNodeSelection()` : ~30 occurrences `.interrupt().transition().duration(t).attr("opacity", ...)` → `.classed("dimmed", bool)`
+- Hover handlers (`addNeighborHover`, `addCenterHover`, `addHoverInteractions`) : `.attr("opacity", x)` → `.classed("dimmed", bool)`
+- `SELECTION_TRANSITION_MS` renommé en `COLOR_TRANSITION_MS` (ne sert plus que pour les couleurs)
 
-// Après : toggle de classe CSS
-nodeGroup.classed("dimmed", !isConnected).classed("selected", isSelected);
-```
-
-**Limites :** L'animation électrique (dash flow + oscillation couleur) doit rester en JS car elle est continue et dynamique. Seules les transitions d'état (sélection/désélection/hover) passent en CSS.
-
-**Dépendances :** P4 (les références directes facilitent le toggle de classes).
+**Voir :** `Doc/2026_05_28_Modifications_P5.md`
 
 ---
 
@@ -443,50 +416,44 @@ private allSites: Node[];
 
 ---
 
-### P10 — Pré-calcul badges getBBox
+### P10 — Pré-calcul badges getBBox ✅ TERMINÉ
 
 | Champ | Détail |
 |---|---|
 | **Priorité** | 🟢 Faible |
 | **Effort** | Faible |
-| **Impact** | Rendu initial -30-40% |
-| **Fichiers** | `graph.component.ts` → services |
-| **Statut** | ⬜ Non commencé |
+| **Impact** | Rendu initial -30-40%, ~50 getBBox/tick simulation éliminés |
+| **Fichiers** | `text-measurer.ts`, `force-layout.service.ts`, `hierarchy-layout.service.ts` |
+| **Statut** | ✅ Terminé |
+| **Date** | 2026-05-27 |
 
-**Problème :** `getBBox()` force un layout synchrone du navigateur. Appelé ~100 fois pour un site avec 50 liens.
+**Problème :** `getBBox()` force un layout synchrone du navigateur. Appelé ~100 fois pour un site avec 50 liens au rendu initial, et ~50 fois par tick de simulation.
 
-**Solution 1 — Pré-calculer les largeurs de badges :**
+**Solution retenue — Pré-calcul via canvas `measureText()` avec cache :**
 
-```typescript
-// Les badges "A" et "L" ont une largeur constante
-// Les badges "DMS:xxxxxx" ont une largeur prédictible ≈ 7px × len + 8px padding
-private computeBadgeWidth(text: string): number {
-  return text.length * 7 + 8;
-}
-private computeBadgeHeight(): number {
-  return 14; // hauteur fixe
-}
-```
+Utilitaire `text-measurer.ts` mesurant la largeur du texte via un canvas hors-écran, avec cache O(1) par clé `(fontWeight|fontSize|text)`. Quatre fonctions exportées :
 
-**Solution 2 — Batcher les lectures getBBox :**
-
-Regrouper tous les `append("text")` en premier, puis un seul cycle de lecture `getBBox()`, puis appliquer les `rect` en batch :
+- `measureText()` — mesure basique `{width, height}`
+- `computeCenteredBadgeRect()` — badges edge labels (text-anchor: middle)
+- `computeCenteredTagRect()` — tags SIGMPR (text-anchor: middle à position)
+- `computeStartAnchorTagRect()` — tags SIGMPR en arborescence (text-anchor: start)
 
 ```typescript
-// Avant : interleave append + getBBox (force N layouts)
-texts.forEach(t => {
-  const el = g.append("text").text(t);
-  const bbox = el.node().getBBox();
-  g.append("rect").attr("width", bbox.width + 8);
-});
+// Avant : getBBox() force un layout synchrone par appel
+const bbox = textEl.getBBox();
+el.selectAll("rect").attr("x", bbox.x - 4)...
 
-// Après : batch append, puis batch getBBox, puis batch rect
-const textEls = texts.map(t => g.append("text").text(t));
-const bboxes = textEls.map(el => (el.node() as SVGTextElement).getBBox()); // 1 seul layout
-textEls.forEach((el, i) => { /* utiliser bboxes[i] */ });
+// Après : pré-calcul canvas avec cache O(1)
+const badgeRect = computeCenteredBadgeRect(badgeText, 10, "700", 4, 2);
+el.selectAll("rect").attr("x", badgeRect.x)...
 ```
 
-**Dépendances :** P2 (plus facile à implémenter dans les services dédiés).
+**Appels getBBox restants (justifiés) :**
+- `addEdgeTooltip()` (Force) — hover only
+- `addHoverInteractions()` (Hierarchy) — hover only
+- `setupAutoZoomAndResize()` (SvgBuilder) — zoom sur groupe complet
+
+**Dépendances :** P2 (implémenté dans les services dédiés).
 
 ---
 
@@ -497,13 +464,13 @@ textEls.forEach((el, i) => { /* utiliser bboxes[i] */ });
 | P1 | 🔴 Critique | Imports D3 sélectifs | ✅ Terminé | — | 2026-05-26 | Bundle main.js : 123.75 kB |
 | P2 | 🔴 Critique | Découpage composant monolithe | ✅ Terminé | — | 2026-05-27 | 7 étapes terminées. Étape 7 : zéro any, zéro eslint-disable, build OK, test visuel OK |
 | P3 | 🟠 Élevé | Enter/Update/Exit D3 | ✅ Terminé | — | 2026-05-28 | Force layout incrémental + correction bugs désélection et SIGMPR. 12/12 scénarios validés |
-| P4 | 🟠 Élevé | Références directes vs DOM queries | ⬜ Non commencé | — | — | Dépend de P2 |
-| P5 | 🟠 Élevé | Transitions CSS vs D3 inline | ⬜ Non commencé | — | — | Dépend de P4 |
+| P4 | 🟠 Élevé | Références directes vs DOM queries | ✅ Terminé | — | 2026-05-27 | ElementRefs Maps O(1), classes CSS .inner-circle/.halo-circle, nettoyage data-* attributes, hover handlers avec Maps |
+| P5 | 🟠 Élevé | Transitions CSS vs D3 inline | ✅ Terminé | — | 2026-05-28 | Approche hybride : opacity → CSS .dimmed, couleurs → D3 inline. Classes .g-node/.g-edge/.g-badge |
 | P6 | 🟠 Élevé | Extraction HierarchyLayoutService | ✅ Terminé | — | 2026-05-26 | Fusionné dans P2 (étapes 5+6). Code partagé Tree/Dendrogram |
 | P7 | 🟢 Faible | Cache buildHierarchy | ✅ Terminé | — | 2026-05-26 | Clé = siteId:collapsedCount:collapsedIds |
 | P8 | 🟡 Modéré | OnPush + d3.timer 30fps | ✅ Terminé | — | 2026-05-26 | ChangeDetectionStrategy.OnPush + markForCheck + 30fps throttle + couleurs pré-calculées |
 | P9 | 🟡 Modéré | Index searchBySigmpr | ✅ Terminé | — | 2026-05-26 | O(k) lookups via Maps |
-| P10 | 🟢 Faible | Pré-calcul badges getBBox | ⬜ Non commencé | — | — | Dépend de P2 |
+| P10 | 🟢 Faible | Pré-calcul badges getBBox | ✅ Terminé | — | 2026-05-27 | Canvas measureText + cache O(1). getBBox éliminé des chemins chauds (tick simulation + rendu). 3 appels restants justifiés (hover + zoom) |
 
 ### Légende des statuts
 
