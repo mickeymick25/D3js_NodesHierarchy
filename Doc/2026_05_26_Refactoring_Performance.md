@@ -136,31 +136,28 @@ src/app/
 
 ---
 
-### P3 — Enter/Update/Exit D3 (rendu incrémental)
+### P3 — Enter/Update/Exit D3 (rendu incrémental) 🔄 EN COURS
 
 | Champ | Détail |
 |---|---|
 | **Priorité** | 🟠 Élevé |
 | **Effort** | Moyen |
 | **Impact** | Rendu incrémental -60% sur changements partiels |
-| **Fichier** | `graph.component.ts` → services |
-| **Statut** | ⬜ Non commencé |
+| **Fichier** | `graph.component.ts`, `force-layout.service.ts` |
+| **Statut** | 🔄 En cours — Force layout implémenté, hierarchy layouts en attente |
 
-**Problème :** `this.g!.selectAll("*").remove()` détruit et recrée tout le DOM SVG à chaque rendu. Pour 50+ nœuds et liens, cela signifie des centaines de créations/insertions DOM.
+**Implémentation :** Voir `Doc/2026_05_27_Modifications_P3.md`
 
-**Solution :** Pattern Enter/Update/Exit de D3 :
+**Ce qui est fait :**
+- `GraphComponent.ngOnChanges()` différencie site change (full rebuild) vs data change (incremental update)
+- `ForceLayoutService.update()` — pattern Enter/Update/Exit D3 pour le mode Force
+- Toggle filtre Animation/Logistique → mise à jour incrémentale (pas de flash)
+- Fallback vers `render()` si les groupes SVG n'existent pas
 
-```typescript
-// Au lieu de tout détruire et recréer :
-const nodeGroups = g.selectAll("[data-node-id]")
-  .data(nodes, d => d.id);
-
-nodeGroups.exit().transition().duration(300).remove();  // Exit
-const entering = nodeGroups.enter().append("g")...;      // Enter
-entering.merge(nodeGroups)                                // Update
-  .transition().duration(300)
-  .attr("transform", d => `translate(${d.x},${d.y})`);
-```
+**Ce qui reste à faire :**
+- Enter/Update/Exit pour les layouts hiérarchiques (Tree/Dendrogram)
+- Mesure de performance avant/après
+- Tests visuels
 
 **Cas d'usage concrets :**
 - Toggle filtre Animation/Logistique : seuls les nœuds/liens affectés changent
@@ -498,11 +495,11 @@ textEls.forEach((el, i) => { /* utiliser bboxes[i] */ });
 | # | Priorité | Action | Statut | Commit | Date | Notes |
 |---|---|---|---|---|---|---|
 | P1 | 🔴 Critique | Imports D3 sélectifs | ✅ Terminé | — | 2026-05-26 | Bundle main.js : 123.75 kB |
-| P2 | 🔴 Critique | Découpage composant monolithe | ⬜ Non commencé | — | — | Dépend de P1 |
-| P3 | 🟠 Élevé | Enter/Update/Exit D3 | ⬜ Non commencé | — | — | Dépend de P2 |
+| P2 | 🔴 Critique | Découpage composant monolithe | ✅ Terminé | — | 2026-05-27 | 7 étapes terminées. Étape 7 : zéro any, zéro eslint-disable, build OK, test visuel OK |
+| P3 | 🟠 Élevé | Enter/Update/Exit D3 | ✅ Terminé | — | 2026-05-28 | Force layout incrémental + correction bugs désélection et SIGMPR. 12/12 scénarios validés |
 | P4 | 🟠 Élevé | Références directes vs DOM queries | ⬜ Non commencé | — | — | Dépend de P2 |
 | P5 | 🟠 Élevé | Transitions CSS vs D3 inline | ⬜ Non commencé | — | — | Dépend de P4 |
-| P6 | 🟠 Élevé | Extraction HierarchyLayoutService | ⬜ Non commencé | — | — | Dépend de P2 |
+| P6 | 🟠 Élevé | Extraction HierarchyLayoutService | ✅ Terminé | — | 2026-05-26 | Fusionné dans P2 (étapes 5+6). Code partagé Tree/Dendrogram |
 | P7 | 🟢 Faible | Cache buildHierarchy | ✅ Terminé | — | 2026-05-26 | Clé = siteId:collapsedCount:collapsedIds |
 | P8 | 🟡 Modéré | OnPush + d3.timer 30fps | ✅ Terminé | — | 2026-05-26 | ChangeDetectionStrategy.OnPush + markForCheck + 30fps throttle + couleurs pré-calculées |
 | P9 | 🟡 Modéré | Index searchBySigmpr | ✅ Terminé | — | 2026-05-26 | O(k) lookups via Maps |
