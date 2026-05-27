@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// D3 simulation types
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { type SimulationNodeDatum, type SimulationLinkDatum } from "d3-force";
+
 export type NodeType = "SITE" | "R1" | "R2";
 
 export type LayoutMode = "force" | "tree" | "dendrogram";
@@ -30,6 +36,40 @@ export interface SigmprSearchResult {
   r1Label: string;
   siteId: string;
   siteLabel: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D3 simulation node / link (used by Force layout)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface SimNode extends SimulationNodeDatum {
+  id: string;
+  label: string;
+  type: NodeType;
+  sigmpr?: string;
+}
+
+export interface SimLink extends SimulationLinkDatum<SimNode> {
+  edgeType: "ANIMATION" | "LOGISTICS";
+  sourceId: string;
+  targetId: string;
+  dmsId?: string;
+  _parallelIndex?: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hierarchy datum (used by Tree / Dendrogram layouts)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface HierarchyDatum {
+  id: string;
+  realId?: string; // original node ID (when id is a composite for uniqueness)
+  label: string;
+  type: NodeType;
+  edgeType?: "ANIMATION" | "LOGISTICS";
+  dmsId?: string;
+  sigmpr?: string;
+  children?: HierarchyDatum[];
 }
 
 export const LAYOUT_MODES: {
