@@ -1264,8 +1264,8 @@ export class ForceLayoutService {
       el.select(".label-dmsid").attr("x", mx).attr("y", my);
 
       el.selectAll("rect")
-        .attr("x", String(badgeRect.x))
-        .attr("y", String(badgeRect.y))
+        .attr("x", String(badgeRect.x + mx))
+        .attr("y", String(badgeRect.y + my))
         .attr("width", String(badgeRect.width))
         .attr("height", String(badgeRect.height));
 
